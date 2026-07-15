@@ -1,0 +1,10 @@
+# rho-ui project gitignore settings
+
+# rho configuration
+.rho
+
+# rho logs
+logs
+
+# build artifacts
+/target
