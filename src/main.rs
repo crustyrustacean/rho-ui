@@ -3,6 +3,7 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::time::Instant;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::RwLock;
@@ -58,6 +59,7 @@ enum ApprovalResolution {
     Pending,
     Approved,
     Denied,
+    Redirected(String),
 }
 
 static CHAT_BLOCKS: RwLock<Vec<ChatBlock>> = RwLock::new(Vec::new());
@@ -79,6 +81,7 @@ enum RhoOutput {
 #[derive(Clone, Debug, PartialEq)]
 enum RequestKind {
     GetState,
+    GetSessionStats,
     ListModels,
     ListProviders,
     ListSessions,
@@ -312,6 +315,9 @@ impl RhoAgent {
     fn resume_session(&mut self, path: &str) -> Result<(), String> {
         self.request(RequestKind::ResumeSession, "resumeSession", serde_json::json!({ "path": path }))
     }
+    fn get_session_stats(&mut self) -> Result<(), String> {
+        self.request(RequestKind::GetSessionStats, "getSessionStats", serde_json::json!({}))
+    }
     fn approval_response(&mut self, approved: bool, message: Option<String>) -> Result<(), String> {
         let params = match message {
             Some(m) => serde_json::json!({ "approved": approved, "message": m }),
@@ -445,7 +451,7 @@ impl Widget for ChatScroll {
                             }
                             ChatBlock::Response(text) => {
                                 let w = list.item(cx, item_id, id!(Response));
-                                w.label(cx, ids!(msg)).set_text(cx, text);
+                                w.markdown(cx, ids!(msg)).set_text(cx, text);
                                 w.draw_all_unscoped(cx);
                             }
                             ChatBlock::ToolCall { name, args, status, output } => {
@@ -478,21 +484,23 @@ impl Widget for ChatScroll {
                                 let w = list.item(cx, item_id, id!(Approval));
                                 w.label(cx, ids!(head))
                                     .set_text(cx, &format!("{} {} ({})", tool, arguments, risk));
-                                match resolution {
-                                    ApprovalResolution::Pending => {
-                                        w.widget(cx, ids!(buttons)).set_visible(cx, true);
-                                        w.widget(cx, ids!(resolved)).set_visible(cx, false);
-                                    }
+                                let (show_actions, resolved_text) = match resolution {
+                                    ApprovalResolution::Pending => (true, None),
                                     ApprovalResolution::Approved => {
-                                        w.widget(cx, ids!(buttons)).set_visible(cx, false);
-                                        w.widget(cx, ids!(resolved)).set_visible(cx, true);
-                                        w.label(cx, ids!(resolved)).set_text(cx, "\u{2713} approved");
+                                        (false, Some("\u{2713} approved".to_string()))
                                     }
                                     ApprovalResolution::Denied => {
-                                        w.widget(cx, ids!(buttons)).set_visible(cx, false);
-                                        w.widget(cx, ids!(resolved)).set_visible(cx, true);
-                                        w.label(cx, ids!(resolved)).set_text(cx, "\u{2717} denied");
+                                        (false, Some("\u{2717} denied".to_string()))
                                     }
+                                    ApprovalResolution::Redirected(msg) => {
+                                        (false, Some(format!("\u{21aa} redirected: {}", msg)))
+                                    }
+                                };
+                                w.widget(cx, ids!(buttons)).set_visible(cx, show_actions);
+                                w.widget(cx, ids!(redirect_row)).set_visible(cx, show_actions);
+                                w.widget(cx, ids!(resolved)).set_visible(cx, resolved_text.is_some());
+                                if let Some(t) = resolved_text {
+                                    w.label(cx, ids!(resolved)).set_text(cx, &t);
                                 }
                                 w.draw_all_unscoped(cx);
                             }
@@ -572,8 +580,10 @@ script_mod! {
             Response := View {
                 width: Fill height: Fit
                 margin: Inset{bottom: 8}
-                msg := Label {
+                msg := Markdown {
                     width: Fill
+                    height: Fit
+                    body: ""
                     draw_text.color: #xdcdcdc
                     draw_text.text_style.font_size: 13
                 }
@@ -646,6 +656,29 @@ script_mod! {
                         draw_text.text_style.font_size: 12
                     }
                 }
+                redirect_row := View {
+                    width: Fill height: Fit
+                    flow: Right spacing: 6
+                    redirect_input := TextInput {
+                        width: Fill height: Fit
+                        empty_text: "redirect with instructions…"
+                        draw_text.color: #xdcdcdc
+                        draw_text.text_style.font_size: 12
+                        draw_bg.color: #x1a1a20
+                        draw_bg.border_size: 1.0
+                        draw_bg.border_color: #x4a4a4a
+                        is_multiline: false
+                        submit_on_enter: false
+                    }
+                    redirect := Button {
+                        text: "Redirect"
+                        draw_bg.color: #x4a3a00
+                        draw_bg.color_hover: #x6a5000
+                        draw_bg.color_down: #x3a2a00
+                        draw_text.color: #xeaeaea
+                        draw_text.text_style.font_size: 12
+                    }
+                }
                 resolved := Label { width: Fit draw_text.color: #x9a9a9a draw_text.text_style.font_size: 12 }
             }
 
@@ -709,6 +742,15 @@ script_mod! {
                             draw_bg.color_down: #x1a1a20
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
+                        }
+                        model_filter := TextInput{
+                            width: 90
+                            empty_text: "filter…"
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                            draw_bg.color: #x1a1a20
+                            draw_bg.border_size: 1.0
+                            draw_bg.border_color: #x3a3a40
                         }
                         model_dropdown := DropDown{
                             width: 150
@@ -816,7 +858,7 @@ script_mod! {
                             width: Fill height: Fit
                             flow: Right spacing: 8 align: Align{y: 0.5}
                             footer_stats := Label{
-                                text: "12.3k  8.7k R4.2k $0.042 23%/200k(auto)"
+                                text: ""
                                 draw_text.color: #x6a6a6a
                                 draw_text.text_style.font_size: 11
                             }
@@ -851,7 +893,17 @@ pub struct App {
     #[rust]
     models: Vec<String>,
     #[rust]
+    filtered_models: Vec<String>,
+    #[rust]
+    model_filter_text: String,
+    #[rust]
     current_model: Option<String>,
+    #[rust]
+    next_frame: NextFrame,
+    #[rust]
+    working_start: Option<Instant>,
+    #[rust]
+    working_state: String,
 }
 
 #[derive(Default)]
@@ -887,13 +939,61 @@ impl App {
         self.ui.widget(cx, ids!(working)).set_visible(cx, busy);
     }
 
+    /// Start an agent turn: show the working line and begin the spinner animation.
+    fn start_working(&mut self, cx: &mut Cx) {
+        self.working_start = Some(Instant::now());
+        self.working_state.clear();
+        self.set_busy(cx, true);
+        self.tick_working(cx);
+        self.next_frame = cx.new_next_frame();
+    }
+
+    /// End an agent turn: hide the working line and stop animating.
+    fn stop_working(&mut self, cx: &mut Cx) {
+        self.working_start = None;
+        self.set_busy(cx, false);
+    }
+
+    /// Refresh the working-line label: cycling braille spinner + elapsed + state.
+    fn tick_working(&self, cx: &mut Cx) {
+        if let Some(start) = self.working_start {
+            const SPINNER: [char; 10] = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+            let elapsed = start.elapsed();
+            let ch = SPINNER[((elapsed.as_millis() / 80) as usize) % SPINNER.len()];
+            let state = if self.working_state.is_empty() {
+                "thinking"
+            } else {
+                &self.working_state
+            };
+            self.ui
+                .label(cx, ids!(working_text))
+                .set_text(cx, &format!("{} Working  {:.1}s  {}", ch, elapsed.as_secs_f64(), state));
+        }
+    }
+
     /// Populate the model dropdown from `self.models` and select the current one.
     fn sync_model_dropdown(&self, cx: &mut Cx) {
         let dd = self.ui.drop_down(cx, ids!(model_dropdown));
-        dd.set_labels(cx, self.models.clone());
+        dd.set_labels(cx, self.filtered_models.clone());
         if let Some(m) = &self.current_model {
             dd.set_selected_by_label(m, cx);
         }
+    }
+
+    /// Recompute the filtered model list from `models` + `model_filter_text`,
+    /// then refresh the dropdown.
+    fn recompute_filtered_models(&mut self, cx: &mut Cx) {
+        let f = self.model_filter_text.to_lowercase();
+        self.filtered_models = if f.is_empty() {
+            self.models.clone()
+        } else {
+            self.models
+                .iter()
+                .filter(|m| m.to_lowercase().contains(&f))
+                .cloned()
+                .collect()
+        };
+        self.sync_model_dropdown(cx);
     }
 
     /// Handle a JSON-RPC response, dispatched by request kind.
@@ -917,7 +1017,7 @@ impl App {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.sync_model_dropdown(cx);
+                self.recompute_filtered_models(cx);
             }
             RequestKind::SetModel => {
                 let model = jstr(Some(&result), "model");
@@ -973,23 +1073,42 @@ impl App {
                 self.ui.label(cx, ids!(footer_pwd)).set_text(cx, &cwd);
                 self.push_block(cx, ChatBlock::Info(format!("\u{21bb} resumed session ({})", cwd)));
             }
+            RequestKind::GetSessionStats => {
+                let api = result.get("apiUsage");
+                self.usage.input = ju64(api, "totalInputTokens");
+                self.usage.output = ju64(api, "totalOutputTokens");
+                self.usage.cached = ju64(api, "totalCachedTokens");
+                self.usage.cost = jf64(api, "totalCost");
+                self.usage.ctx_used = ju64(Some(&result), "estimatedUsed");
+                self.usage.ctx_window = ju64(Some(&result), "contextWindow");
+                self.usage.util = ju64(Some(&result), "utilizationPercent").min(255) as u8;
+                self.update_usage(cx);
+            }
         }
     }
 
     /// Resolve an in-scrollback approval prompt: update the block and tell rho.
-    fn resolve_approval(&mut self, cx: &mut Cx, index: usize, approved: bool) {
+    fn resolve_approval(
+        &mut self,
+        cx: &mut Cx,
+        index: usize,
+        approved: bool,
+        message: Option<String>,
+    ) {
+        let msg = message.filter(|m| !m.is_empty());
+        let resolution = match (approved, &msg) {
+            (true, _) => ApprovalResolution::Approved,
+            (false, Some(m)) => ApprovalResolution::Redirected(m.clone()),
+            (false, None) => ApprovalResolution::Denied,
+        };
         {
             let mut blocks = CHAT_BLOCKS.write().unwrap();
-            if let Some(ChatBlock::Approval { resolution, .. }) = blocks.get_mut(index) {
-                *resolution = if approved {
-                    ApprovalResolution::Approved
-                } else {
-                    ApprovalResolution::Denied
-                };
+            if let Some(ChatBlock::Approval { resolution: res, .. }) = blocks.get_mut(index) {
+                *res = resolution;
             }
         }
         if let Some(agent) = &mut self.agent {
-            let _ = agent.approval_response(approved, None);
+            let _ = agent.approval_response(approved, msg);
         }
         self.tail_and_redraw(cx);
     }
@@ -1024,10 +1143,11 @@ impl App {
                 if let Some(agent) = &mut self.agent {
                     let _ = agent.get_state();
                     let _ = agent.list_models();
+                    let _ = agent.get_session_stats();
                 }
             }
             RhoEvent::AgentStart => {
-                self.set_busy(cx, true);
+                self.start_working(cx);
             }
             RhoEvent::MessageDelta { delta } => {
                 append_streaming_response(&delta);
@@ -1046,17 +1166,19 @@ impl App {
                         blocks.push(ChatBlock::Response(reply));
                     }
                 }
-                self.set_busy(cx, false);
+                self.stop_working(cx);
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.get_session_stats();
+                }
                 self.tail_and_redraw(cx);
             }
             RhoEvent::AgentError { error } => {
                 self.push_block(cx, ChatBlock::Info(format!("\u{26a0} {}", error)));
-                self.set_busy(cx, false);
+                self.stop_working(cx);
             }
             RhoEvent::StateChange { state } => {
-                self.ui
-                    .label(cx, ids!(working_text))
-                    .set_text(cx, &format!("\u{2803} Working\u{2026} {}", state));
+                self.working_state = state;
+                self.tick_working(cx);
             }
             RhoEvent::ToolCall { name, arguments } => {
                 CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
@@ -1111,7 +1233,7 @@ impl App {
             RhoEvent::Closed => {
                 self.push_block(cx, ChatBlock::Info("rho process exited.".into()));
                 self.agent = None;
-                self.set_busy(cx, false);
+                self.stop_working(cx);
             }
         }
     }
@@ -1166,9 +1288,13 @@ impl MatchEvent for App {
             return;
         }
 
-        // ── Model dropdown: pick a model -> setModel ──
+        // ── Model dropdown: filter + pick a model -> setModel ──
+        if let Some(filter) = self.ui.text_input(cx, ids!(model_filter)).changed(actions) {
+            self.model_filter_text = filter;
+            self.recompute_filtered_models(cx);
+        }
         if let Some(idx) = self.ui.drop_down(cx, ids!(model_dropdown)).selected(actions) {
-            if let Some(model) = self.models.get(idx).cloned() {
+            if let Some(model) = self.filtered_models.get(idx).cloned() {
                 if self.current_model.as_deref() != Some(model.as_str()) {
                     if let Some(agent) = &mut self.agent {
                         let _ = agent.set_model(&model);
@@ -1179,16 +1305,20 @@ impl MatchEvent for App {
 
         // ── Inline block actions: approval buttons + click-to-resume sessions ──
         // Collect first, then act, so we don't mutate the portal list mid-iteration.
-        let mut approvals: Vec<(usize, bool)> = Vec::new();
+        let mut approvals: Vec<(usize, bool, Option<String>)> = Vec::new();
         let mut resumes: Vec<String> = Vec::new();
         {
             let list = self.ui.widget(cx, ids!(chat_scroll)).portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
                 if item.button(cx, ids!(approve)).clicked(actions) {
-                    approvals.push((item_id, true));
+                    approvals.push((item_id, true, None));
                 }
                 if item.button(cx, ids!(deny)).clicked(actions) {
-                    approvals.push((item_id, false));
+                    approvals.push((item_id, false, None));
+                }
+                if item.button(cx, ids!(redirect)).clicked(actions) {
+                    let msg = item.text_input(cx, ids!(redirect_input)).text();
+                    approvals.push((item_id, false, Some(msg)));
                 }
                 if item.button(cx, ids!(btn)).clicked(actions) {
                     let path = CHAT_BLOCKS.read().unwrap().get(item_id).and_then(|b| match b {
@@ -1201,8 +1331,8 @@ impl MatchEvent for App {
                 }
             }
         }
-        for (idx, approved) in approvals {
-            self.resolve_approval(cx, idx, approved);
+        for (idx, approved, msg) in approvals {
+            self.resolve_approval(cx, idx, approved, msg);
         }
         for path in resumes {
             if let Some(agent) = &mut self.agent {
@@ -1267,6 +1397,12 @@ impl AppMain for App {
             for ev in events {
                 self.handle_rho_event(cx, ev);
             }
+        }
+
+        // Animate the working-line spinner while an agent turn is in flight.
+        if self.busy && self.next_frame.is_event(event).is_some() {
+            self.tick_working(cx);
+            self.next_frame = cx.new_next_frame();
         }
     }
 }
