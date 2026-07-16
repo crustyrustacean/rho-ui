@@ -941,6 +941,7 @@ impl App {
 
     /// Start an agent turn: show the working line and begin the spinner animation.
     fn start_working(&mut self, cx: &mut Cx) {
+        eprintln!("[busy] -> true (agent/start)");
         self.working_start = Some(Instant::now());
         self.working_state.clear();
         self.set_busy(cx, true);
@@ -950,6 +951,7 @@ impl App {
 
     /// End an agent turn: hide the working line and stop animating.
     fn stop_working(&mut self, cx: &mut Cx) {
+        eprintln!("[busy] -> false");
         self.working_start = None;
         self.set_busy(cx, false);
     }
@@ -1110,6 +1112,9 @@ impl App {
         if let Some(agent) = &mut self.agent {
             let _ = agent.approval_response(approved, msg);
         }
+        // The user likely typed the steer into the (now-hidden) redirect_input;
+        // return focus to the main input so typing/Enter work immediately.
+        self.ui.text_input(cx, ids!(input_inner)).set_key_focus(cx);
         self.tail_and_redraw(cx);
     }
 
@@ -1137,6 +1142,7 @@ impl App {
 
     /// Map one rho JSON-RPC notification onto CHAT_BLOCKS / UI state.
     fn handle_rho_event(&mut self, cx: &mut Cx, ev: RhoEvent) {
+        eprintln!("[rho-event] {:?}", ev);
         match ev {
             RhoEvent::Ready => {
                 self.push_block(cx, ChatBlock::Info("\u{2713} Connected to rho".into()));
@@ -1177,8 +1183,16 @@ impl App {
                 self.stop_working(cx);
             }
             RhoEvent::StateChange { state } => {
-                self.working_state = state;
+                self.working_state = state.clone();
                 self.tick_working(cx);
+                // rho-core emits `idle` only on a terminal turn outcome (just
+                // before `agent/end`), never mid-turn — retries/compaction return
+                // `Thinking`, not `Idle`. So it's a reliable end-of-turn marker:
+                // clear busy here so the spinner can never get stuck even if a
+                // later `agent/end`/`agent/error` is dropped or reordered.
+                if state == "idle" && self.busy {
+                    self.stop_working(cx);
+                }
             }
             RhoEvent::ToolCall { name, arguments } => {
                 CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
