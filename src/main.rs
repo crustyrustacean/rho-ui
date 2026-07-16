@@ -75,8 +75,8 @@ static CHAT_BLOCKS: RwLock<Vec<ChatBlock>> = RwLock::new(Vec::new());
 /// Models shown in the picker modal: (name, is_current).
 static MODELS: RwLock<Vec<(String, bool)>> = RwLock::new(Vec::new());
 
-/// Sessions shown in the picker modal: (path, entry_count).
-static SESSIONS: RwLock<Vec<(String, u64)>> = RwLock::new(Vec::new());
+/// Sessions shown in the picker modal: (path, mtime_secs, entry_count).
+static SESSIONS: RwLock<Vec<(String, u64, u64)>> = RwLock::new(Vec::new());
 
 // ── rho agent bridge ────────────────────────────────────────────────────────
 // rho-coding-agent runs as a headless JSON-RPC 2.0 server over stdio. We spawn
@@ -371,6 +371,29 @@ pub(crate) fn trace_enabled() -> bool {
     })
 }
 
+/// Compact, timezone-free recency label for a unix-epoch timestamp (seconds).
+/// Used for the session table's date column.
+fn relative_time(secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let delta = now.saturating_sub(secs);
+    if delta < 60 {
+        "just now".to_string()
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86_400 {
+        format!("{}h ago", delta / 3600)
+    } else if delta < 86_400 * 7 {
+        format!("{}d ago", delta / 86_400)
+    } else if delta < 86_400 * 30 {
+        format!("{}w ago", delta / (86_400 * 7))
+    } else {
+        format!("{}mo ago", delta / (86_400 * 30))
+    }
+}
+
 // Streaming helpers: append into the trailing block of the right kind, creating
 // it when the kind changes, so consecutive deltas accumulate into one block.
 fn append_streaming_response(delta: &str) {
@@ -593,10 +616,17 @@ impl Widget for SessionList {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, sessions.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    if let Some((path, entries)) = sessions.get(item_id) {
+                    if let Some((path, mtime, entries)) = sessions.get(item_id) {
                         let w = list.item(cx, item_id, id!(row));
-                        w.button(cx, ids!(pick))
-                            .set_text(cx, &format!("\u{21bb} {} ({} entries)", path, entries));
+                        // Monospace, fixed-width columns so rows line up:
+                        //   date (11) | entries (12) | path (rest)
+                        let row = format!(
+                            "{:<11}{:<12}{}",
+                            relative_time(*mtime),
+                            format!("{} entries", entries),
+                            path
+                        );
+                        w.button(cx, ids!(pick)).set_text(cx, &row);
                         w.draw_all_unscoped(cx);
                     }
                 }
@@ -814,15 +844,17 @@ script_mod! {
 
             row := View {
                 width: Fill height: Fit
-                margin: Inset{bottom: 2}
+                margin: Inset{bottom: 1}
                 pick := Button {
                     width: Fill height: Fit
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{top: 6 right: 8 bottom: 6 left: 8}
                     text: ""
                     draw_bg.color: #x1e1e24
                     draw_bg.color_hover: #x2a2a30
                     draw_bg.color_down: #x15151a
-                    draw_text.color: #x9a9a9a
-                    draw_text.text_style.font_size: 12
+                    draw_text.color: #xcacaca
+                    draw_text.text_style: theme.font_code{font_size: 12}
                 }
             }
         }
@@ -1039,6 +1071,16 @@ script_mod! {
                                     draw_text.color: #xeaeaea
                                     draw_text.text_style.font_size: 13
                                 }
+                                // Column header — monospace, padded to match the
+                                // rows' `{:<11}{:<12}` layout, and offset so it lines
+                                // up with the row text (SolidView pad 10 + 12).
+                                session_header := Label{
+                                    width: Fill
+                                    text: "Modified   Entries     Session"
+                                    margin: Inset{left: 12 top: 2 bottom: 4}
+                                    draw_text.color: #x7a7a7a
+                                    draw_text.text_style: theme.font_code{font_size: 12}
+                                }
                                 session_list := SessionList {
                                     width: Fill
                                     height: 340
@@ -1231,15 +1273,23 @@ impl App {
                 self.tail_and_redraw(cx);
             }
             RequestKind::ListSessions => {
-                let sessions: Vec<(String, u64)> = result
+                let mut sessions: Vec<(String, u64, u64)> = result
                     .get("sessions")
                     .and_then(|x| x.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .map(|s| (jstr(Some(s), "path"), ju64(Some(s), "entryCount")))
+                            .map(|s| {
+                                (
+                                    jstr(Some(s), "path"),
+                                    ju64(Some(s), "mtimeSecs"),
+                                    ju64(Some(s), "entryCount"),
+                                )
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
+                // Newest first (by modification time).
+                sessions.sort_by(|a, b| b.1.cmp(&a.1));
                 if sessions.is_empty() {
                     self.push_block(cx, ChatBlock::Info("No previous sessions.".into()));
                 } else {
@@ -1520,7 +1570,7 @@ impl MatchEvent for App {
             let list = self.ui.widget(cx, ids!(session_list)).portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
                 if item.button(cx, ids!(pick)).clicked(actions) {
-                    if let Some((path, _)) = SESSIONS.read().unwrap().get(item_id) {
+                    if let Some((path, _, _)) = SESSIONS.read().unwrap().get(item_id) {
                         resumed = Some(path.clone());
                     }
                 }
