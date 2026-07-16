@@ -11,6 +11,16 @@ use std::thread;
 
 app_main!(App);
 
+/// Diagnostic tracing for the agent event stream. Silent by default; enable
+/// with `RHO_UI_TRACE=1` to see every `RhoEvent` and `busy` transition.
+macro_rules! trace {
+    ($($arg:tt)*) => {
+        if crate::trace_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 // ── Message model ──────────────────────────────────────────────────────────
 // The conversation lives in a global: the ChatScroll widget reads it during
 // draw, App mutates it in response to user actions. This mirrors the makepad
@@ -63,6 +73,9 @@ enum ApprovalResolution {
 }
 
 static CHAT_BLOCKS: RwLock<Vec<ChatBlock>> = RwLock::new(Vec::new());
+
+/// Models shown in the picker modal: (name, is_current).
+static MODELS: RwLock<Vec<(String, bool)>> = RwLock::new(Vec::new());
 
 // ── rho agent bridge ────────────────────────────────────────────────────────
 // rho-coding-agent runs as a headless JSON-RPC 2.0 server over stdio. We spawn
@@ -347,6 +360,16 @@ fn format_secs(ms: u64) -> String {
     format!("{:.1}s", ms as f64 / 1000.0)
 }
 
+/// Whether `RHO_UI_TRACE` diagnostic tracing is on (parsed once, cached).
+pub(crate) fn trace_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("RHO_UI_TRACE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 // Streaming helpers: append into the trailing block of the right kind, creating
 // it when the kind changes, so consecutive deltas accumulate into one block.
 fn append_streaming_response(delta: &str) {
@@ -511,6 +534,43 @@ impl Widget for ChatScroll {
                                 w.draw_all_unscoped(cx);
                             }
                         }
+                    }
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+// ── ModelList: a PortalList of models for the picker modal ──────────────────
+// Mirrors ChatScroll: snapshots the global MODELS during draw. App mutates
+// MODELS (via sync_model_list) and redraws, so the modal's list stays in sync.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ModelList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for ModelList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let models = MODELS.read().unwrap().clone();
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, models.len());
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    if let Some((name, is_current)) = models.get(item_id) {
+                        let w = list.item(cx, item_id, id!(row));
+                        let label = if *is_current {
+                            format!("\u{2713} {}", name)
+                        } else {
+                            name.clone()
+                        };
+                        w.button(cx, ids!(pick)).set_text(cx, &label);
+                        w.draw_all_unscoped(cx);
                     }
                 }
             }
@@ -698,6 +758,34 @@ script_mod! {
         }
     }
 
+    // ModelList wraps a PortalList whose single child is the per-row template.
+    let ModelList = #(ModelList::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        list := PortalList {
+            width: Fill
+            height: Fill
+            flow: Down
+            auto_tail: false
+            drag_scrolling: true
+            padding: Inset{top: 4 right: 4 bottom: 4 left: 4}
+
+            row := View {
+                width: Fill height: Fit
+                margin: Inset{bottom: 2}
+                pick := Button {
+                    width: Fill height: Fit
+                    text: ""
+                    draw_bg.color: #x1e1e24
+                    draw_bg.color_hover: #x2a2a30
+                    draw_bg.color_down: #x15151a
+                    draw_text.color: #xcacaca
+                    draw_text.text_style.font_size: 12
+                }
+            }
+        }
+    }
+
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -743,18 +831,11 @@ script_mod! {
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
-                        model_filter := TextInput{
-                            width: 90
-                            empty_text: "filter…"
-                            draw_text.color: #xcacaca
-                            draw_text.text_style.font_size: 12
-                            draw_bg.color: #x1a1a20
-                            draw_bg.border_size: 1.0
-                            draw_bg.border_color: #x3a3a40
-                        }
-                        model_dropdown := DropDown{
-                            width: 150
-                            labels: []
+                        btn_model := Button{
+                            text: "Model"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
@@ -870,6 +951,41 @@ script_mod! {
                             }
                         }
                     }
+
+                    // ── Model picker modal (overlay; scrollable list) ──
+                    model_modal := Modal{
+                        content +: {
+                            width: 420
+                            height: Fit
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fit
+                                padding: Inset{top: 10 right: 10 bottom: 10 left: 10}
+                                flow: Down spacing: 8
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "Select model"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 13
+                                }
+                                model_filter_input := TextInput{
+                                    width: Fill height: Fit
+                                    empty_text: "filter…"
+                                    draw_text.color: #xdcdcdc
+                                    draw_text.text_style.font_size: 12
+                                    draw_bg.color: #x15151a
+                                    draw_bg.border_size: 1.0
+                                    draw_bg.border_color: #x3a3a40
+                                }
+                                model_list := ModelList {
+                                    width: Fill
+                                    height: 340
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -941,7 +1057,7 @@ impl App {
 
     /// Start an agent turn: show the working line and begin the spinner animation.
     fn start_working(&mut self, cx: &mut Cx) {
-        eprintln!("[busy] -> true (agent/start)");
+        trace!("[busy] -> true (agent/start)");
         self.working_start = Some(Instant::now());
         self.working_state.clear();
         self.set_busy(cx, true);
@@ -951,7 +1067,7 @@ impl App {
 
     /// End an agent turn: hide the working line and stop animating.
     fn stop_working(&mut self, cx: &mut Cx) {
-        eprintln!("[busy] -> false");
+        trace!("[busy] -> false");
         self.working_start = None;
         self.set_busy(cx, false);
     }
@@ -973,13 +1089,17 @@ impl App {
         }
     }
 
-    /// Populate the model dropdown from `self.models` and select the current one.
-    fn sync_model_dropdown(&self, cx: &mut Cx) {
-        let dd = self.ui.drop_down(cx, ids!(model_dropdown));
-        dd.set_labels(cx, self.filtered_models.clone());
-        if let Some(m) = &self.current_model {
-            dd.set_selected_by_label(m, cx);
+    /// Write `filtered_models` into the picker modal's global and redraw it.
+    fn sync_model_list(&self, cx: &mut Cx) {
+        let current = self.current_model.as_deref();
+        {
+            let mut models = MODELS.write().unwrap();
+            models.clear();
+            for m in &self.filtered_models {
+                models.push((m.clone(), Some(m.as_str()) == current));
+            }
         }
+        self.ui.redraw(cx);
     }
 
     /// Recompute the filtered model list from `models` + `model_filter_text`,
@@ -995,7 +1115,7 @@ impl App {
                 .cloned()
                 .collect()
         };
-        self.sync_model_dropdown(cx);
+        self.sync_model_list(cx);
     }
 
     /// Handle a JSON-RPC response, dispatched by request kind.
@@ -1007,7 +1127,7 @@ impl App {
                 self.current_model = Some(model.clone());
                 self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
                 self.ui.label(cx, ids!(footer_pwd)).set_text(cx, &cwd);
-                self.sync_model_dropdown(cx);
+                self.sync_model_list(cx);
             }
             RequestKind::ListModels => {
                 self.models = result
@@ -1025,7 +1145,7 @@ impl App {
                 let model = jstr(Some(&result), "model");
                 self.current_model = Some(model.clone());
                 self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
-                self.sync_model_dropdown(cx);
+                self.sync_model_list(cx);
                 self.push_block(cx, ChatBlock::Info(format!("\u{2192} model: {}", model)));
             }
             RequestKind::ListProviders => {
@@ -1142,7 +1262,7 @@ impl App {
 
     /// Map one rho JSON-RPC notification onto CHAT_BLOCKS / UI state.
     fn handle_rho_event(&mut self, cx: &mut Cx, ev: RhoEvent) {
-        eprintln!("[rho-event] {:?}", ev);
+        trace!("[rho-event] {:?}", ev);
         match ev {
             RhoEvent::Ready => {
                 self.push_block(cx, ChatBlock::Info("\u{2713} Connected to rho".into()));
@@ -1302,17 +1422,35 @@ impl MatchEvent for App {
             return;
         }
 
-        // ── Model dropdown: filter + pick a model -> setModel ──
-        if let Some(filter) = self.ui.text_input(cx, ids!(model_filter)).changed(actions) {
+        // ── Model picker modal: open, filter, pick ──
+        if ui.button(cx, ids!(btn_model)).clicked(actions) {
+            self.model_filter_text.clear();
+            self.ui.text_input(cx, ids!(model_filter_input)).set_text(cx, "");
+            self.filtered_models = self.models.clone();
+            self.sync_model_list(cx);
+            self.ui.modal(cx, ids!(model_modal)).open(cx);
+        }
+        if let Some(filter) = self.ui.text_input(cx, ids!(model_filter_input)).changed(actions) {
             self.model_filter_text = filter;
             self.recompute_filtered_models(cx);
         }
-        if let Some(idx) = self.ui.drop_down(cx, ids!(model_dropdown)).selected(actions) {
-            if let Some(model) = self.filtered_models.get(idx).cloned() {
-                if self.current_model.as_deref() != Some(model.as_str()) {
-                    if let Some(agent) = &mut self.agent {
-                        let _ = agent.set_model(&model);
+        // Pick a model from the modal's list, then close.
+        let mut picked: Option<String> = None;
+        {
+            let list = self.ui.widget(cx, ids!(model_list)).portal_list(cx, ids!(list));
+            for (item_id, item) in list.items_with_actions(actions) {
+                if item.button(cx, ids!(pick)).clicked(actions) {
+                    if let Some((name, _)) = MODELS.read().unwrap().get(item_id) {
+                        picked = Some(name.clone());
                     }
+                }
+            }
+        }
+        if let Some(model) = picked {
+            self.ui.modal(cx, ids!(model_modal)).close(cx);
+            if self.current_model.as_deref() != Some(model.as_str()) {
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.set_model(&model);
                 }
             }
         }
