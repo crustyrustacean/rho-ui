@@ -1,6 +1,7 @@
 pub use makepad_widgets;
 
 use makepad_widgets::*;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
@@ -58,6 +59,17 @@ enum RhoOutput {
     StdoutClosed,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+enum RequestKind {
+    GetState,
+    ListModels,
+    ListProviders,
+    ListSessions,
+    SetModel,
+    ResumeSession,
+}
+
 #[derive(Clone, Debug)]
 enum RhoEvent {
     Ready,
@@ -79,6 +91,8 @@ enum RhoEvent {
         context_window: u64,
         utilization: u8,
     },
+    Response { kind: RequestKind, result: serde_json::Value },
+    RequestError { kind: RequestKind, error: String },
     Closed,
 }
 
@@ -87,6 +101,7 @@ pub struct RhoAgent {
     stdin: ChildStdin,
     receiver: mpsc::Receiver<RhoOutput>,
     next_id: u64,
+    pending: HashMap<u64, RequestKind>,
 }
 
 impl RhoAgent {
@@ -139,7 +154,7 @@ impl RhoAgent {
             }
         });
 
-        Ok(Self { _child: child, stdin, receiver: rx, next_id: 0 })
+        Ok(Self { _child: child, stdin, receiver: rx, next_id: 0, pending: HashMap::new() })
     }
 
     /// Drain queued subprocess output, parsing stdout lines into events.
@@ -148,7 +163,7 @@ impl RhoAgent {
         while let Ok(out) = self.receiver.try_recv() {
             match out {
                 RhoOutput::Stdout(line) => {
-                    if let Some(ev) = parse_event(&line) {
+                    if let Some(ev) = self.parse_stdout(&line) {
                         events.push(ev);
                     }
                 }
@@ -159,70 +174,119 @@ impl RhoAgent {
         events
     }
 
-    fn send_request(&mut self, method: &str, params: serde_json::Value) -> Result<(), String> {
+    /// Parse one stdout line: a JSON-RPC response (has `id`, matched against
+    /// `pending`) or a notification (has `method`).
+    fn parse_stdout(&mut self, line: &str) -> Option<RhoEvent> {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        if let Some(id) = v.get("id").and_then(|x| x.as_u64()) {
+            let kind = self.pending.remove(&id)?;
+            if let Some(err) = v.get("error") {
+                return Some(RhoEvent::RequestError {
+                    kind,
+                    error: err
+                        .get("message")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("request failed")
+                        .to_string(),
+                });
+            }
+            return Some(RhoEvent::Response {
+                kind,
+                result: v.get("result").cloned().unwrap_or(serde_json::Value::Null),
+            });
+        }
+        let method = v.get("method")?.as_str()?;
+        let p = v.get("params");
+        Some(match method {
+            "ready" => RhoEvent::Ready,
+            "agent/start" => RhoEvent::AgentStart,
+            "agent/end" => RhoEvent::AgentEnd {
+                reply: jstr(p, "reply"),
+                duration_ms: ju64(p, "durationMs"),
+            },
+            "agent/error" => RhoEvent::AgentError { error: jstr(p, "error") },
+            "message/delta" => RhoEvent::MessageDelta { delta: jstr(p, "delta") },
+            "reasoning/delta" => RhoEvent::ReasoningDelta { delta: jstr(p, "delta") },
+            "state/change" => RhoEvent::StateChange { state: jstr(p, "state") },
+            "tool/call" => RhoEvent::ToolCall {
+                name: jstr(p, "name"),
+                arguments: jstr(p, "arguments"),
+            },
+            "tool/result" => RhoEvent::ToolResult {
+                name: jstr(p, "name"),
+                is_error: jbool(p, "isError"),
+                output: jstr(p, "output"),
+            },
+            "tool/denied" => RhoEvent::ToolDenied { name: jstr(p, "name") },
+            "usage" => {
+                let u = p.and_then(|p| p.get("usage"));
+                let c = p.and_then(|p| p.get("context"));
+                RhoEvent::Usage {
+                    input_tokens: ju64(u, "inputTokens"),
+                    output_tokens: ju64(u, "outputTokens"),
+                    cached_tokens: ju64(u, "cachedTokens"),
+                    cost: jf64(u, "cost"),
+                    context_used: ju64(c, "estimatedUsed"),
+                    context_window: ju64(c, "contextWindow"),
+                    utilization: ju64(c, "utilizationPercent").min(255) as u8,
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// Write a JSON-RPC request. If `kind` is set, the response is tracked and
+    /// surfaced as `Response`/`RequestError`; otherwise fire-and-forget.
+    fn write_jsonrpc(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        kind: Option<RequestKind>,
+    ) -> Result<(), String> {
         self.next_id += 1;
+        let id = self.next_id;
+        if let Some(k) = kind {
+            self.pending.insert(id, k);
+        }
         let line = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
-            "id": self.next_id,
+            "id": id,
         });
         writeln!(self.stdin, "{}", line).map_err(|e| e.to_string())?;
         self.stdin.flush().map_err(|e| e.to_string())?;
         Ok(())
     }
 
+    fn fire(&mut self, method: &str, params: serde_json::Value) -> Result<(), String> {
+        self.write_jsonrpc(method, params, None)
+    }
+    fn request(&mut self, kind: RequestKind, method: &str, params: serde_json::Value) -> Result<(), String> {
+        self.write_jsonrpc(method, params, Some(kind))
+    }
+
     fn prompt(&mut self, message: &str) -> Result<(), String> {
-        self.send_request("prompt", serde_json::json!({ "message": message }))
+        self.fire("prompt", serde_json::json!({ "message": message }))
     }
-
     fn abort(&mut self) -> Result<(), String> {
-        self.send_request("abort", serde_json::json!({}))
+        self.fire("abort", serde_json::json!({}))
     }
-}
-
-/// Parse one stdout line as a JSON-RPC notification -> RhoEvent.
-/// Responses (have `result`/`error`, no `method`) are ignored.
-fn parse_event(line: &str) -> Option<RhoEvent> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let method = v.get("method")?.as_str()?;
-    let p = v.get("params");
-    Some(match method {
-        "ready" => RhoEvent::Ready,
-        "agent/start" => RhoEvent::AgentStart,
-        "agent/end" => RhoEvent::AgentEnd {
-            reply: jstr(p, "reply"),
-            duration_ms: ju64(p, "durationMs"),
-        },
-        "agent/error" => RhoEvent::AgentError { error: jstr(p, "error") },
-        "message/delta" => RhoEvent::MessageDelta { delta: jstr(p, "delta") },
-        "reasoning/delta" => RhoEvent::ReasoningDelta { delta: jstr(p, "delta") },
-        "state/change" => RhoEvent::StateChange { state: jstr(p, "state") },
-        "tool/call" => RhoEvent::ToolCall {
-            name: jstr(p, "name"),
-            arguments: jstr(p, "arguments"),
-        },
-        "tool/result" => RhoEvent::ToolResult {
-            name: jstr(p, "name"),
-            is_error: jbool(p, "isError"),
-            output: jstr(p, "output"),
-        },
-        "tool/denied" => RhoEvent::ToolDenied { name: jstr(p, "name") },
-        "usage" => {
-            let u = p.and_then(|p| p.get("usage"));
-            let c = p.and_then(|p| p.get("context"));
-            RhoEvent::Usage {
-                input_tokens: ju64(u, "inputTokens"),
-                output_tokens: ju64(u, "outputTokens"),
-                cached_tokens: ju64(u, "cachedTokens"),
-                cost: jf64(u, "cost"),
-                context_used: ju64(c, "estimatedUsed"),
-                context_window: ju64(c, "contextWindow"),
-                utilization: ju64(c, "utilizationPercent").min(255) as u8,
-            }
-        }
-        _ => return None,
-    })
+    fn get_state(&mut self) -> Result<(), String> {
+        self.request(RequestKind::GetState, "getState", serde_json::json!({}))
+    }
+    fn list_models(&mut self) -> Result<(), String> {
+        self.request(RequestKind::ListModels, "listModels", serde_json::json!({}))
+    }
+    fn list_providers(&mut self) -> Result<(), String> {
+        self.request(RequestKind::ListProviders, "listProviders", serde_json::json!({}))
+    }
+    fn list_sessions(&mut self) -> Result<(), String> {
+        self.request(RequestKind::ListSessions, "listSessions", serde_json::json!({}))
+    }
+    fn set_model(&mut self, model: &str) -> Result<(), String> {
+        self.request(RequestKind::SetModel, "setModel", serde_json::json!({ "model": model }))
+    }
 }
 
 fn jstr(p: Option<&serde_json::Value>, k: &str) -> String {
@@ -542,11 +606,9 @@ script_mod! {
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
-                        btn_model := Button{
-                            text: "Model"
-                            draw_bg.color: #x2a2a30
-                            draw_bg.color_hover: #x3a3a40
-                            draw_bg.color_down: #x1a1a20
+                        model_dropdown := DropDown{
+                            width: 150
+                            labels: []
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
@@ -682,6 +744,10 @@ pub struct App {
     busy: bool,
     #[rust]
     usage: UsageState,
+    #[rust]
+    models: Vec<String>,
+    #[rust]
+    current_model: Option<String>,
 }
 
 #[derive(Default)]
@@ -717,6 +783,95 @@ impl App {
         self.ui.widget(cx, ids!(working)).set_visible(cx, busy);
     }
 
+    /// Populate the model dropdown from `self.models` and select the current one.
+    fn sync_model_dropdown(&self, cx: &mut Cx) {
+        let dd = self.ui.drop_down(cx, ids!(model_dropdown));
+        dd.set_labels(cx, self.models.clone());
+        if let Some(m) = &self.current_model {
+            dd.set_selected_by_label(m, cx);
+        }
+    }
+
+    /// Handle a JSON-RPC response, dispatched by request kind.
+    fn handle_response(&mut self, cx: &mut Cx, kind: RequestKind, result: serde_json::Value) {
+        match kind {
+            RequestKind::GetState => {
+                let model = jstr(Some(&result), "model");
+                let cwd = jstr(Some(&result), "cwd");
+                self.current_model = Some(model.clone());
+                self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
+                self.ui.label(cx, ids!(footer_pwd)).set_text(cx, &cwd);
+                self.sync_model_dropdown(cx);
+            }
+            RequestKind::ListModels => {
+                self.models = result
+                    .get("models")
+                    .and_then(|m| m.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|e| e.get("id").and_then(|x| x.as_str()).map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.sync_model_dropdown(cx);
+            }
+            RequestKind::SetModel => {
+                let model = jstr(Some(&result), "model");
+                self.current_model = Some(model.clone());
+                self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
+                self.sync_model_dropdown(cx);
+                self.push_block(cx, ChatBlock::Info(format!("\u{2192} model: {}", model)));
+            }
+            RequestKind::ListProviders => {
+                let mut blocks = CHAT_BLOCKS.write().unwrap();
+                if let Some(arr) = result.get("providers").and_then(|x| x.as_array()) {
+                    blocks.push(ChatBlock::Info(format!("Providers ({}):", arr.len())));
+                    for p in arr {
+                        let name = jstr(Some(p), "name");
+                        let reachable = jbool(Some(p), "reachable");
+                        let active = jbool(Some(p), "active");
+                        let ext = jbool(Some(p), "isExternal");
+                        let state = if reachable { "\u{2713}" } else { "\u{2717}" };
+                        let flags = match (active, ext) {
+                            (true, true) => " [active, external]",
+                            (true, false) => " [active]",
+                            (false, true) => " [external]",
+                            (false, false) => "",
+                        };
+                        blocks.push(ChatBlock::Info(format!("  {} {}{}", name, state, flags)));
+                    }
+                }
+                drop(blocks);
+                self.tail_and_redraw(cx);
+            }
+            RequestKind::ListSessions => {
+                let mut blocks = CHAT_BLOCKS.write().unwrap();
+                if let Some(arr) = result.get("sessions").and_then(|x| x.as_array()) {
+                    if arr.is_empty() {
+                        blocks.push(ChatBlock::Info("No previous sessions.".into()));
+                    } else {
+                        blocks.push(ChatBlock::Info(format!("Sessions ({}):", arr.len())));
+                        for s in arr {
+                            let path = jstr(Some(s), "path");
+                            let entries = ju64(Some(s), "entryCount");
+                            blocks.push(ChatBlock::Info(format!("  {} ({} entries)", path, entries)));
+                        }
+                    }
+                }
+                drop(blocks);
+                self.tail_and_redraw(cx);
+            }
+            RequestKind::ResumeSession => {
+                let model = jstr(Some(&result), "model");
+                let cwd = jstr(Some(&result), "cwd");
+                self.current_model = Some(model.clone());
+                self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
+                self.ui.label(cx, ids!(footer_pwd)).set_text(cx, &cwd);
+                self.push_block(cx, ChatBlock::Info(format!("\u{21bb} resumed session ({})", cwd)));
+            }
+        }
+    }
+
     /// Render the cumulative usage + live context snapshot into the footer.
     fn update_usage(&self, cx: &mut Cx) {
         let u = &self.usage;
@@ -744,6 +899,10 @@ impl App {
         match ev {
             RhoEvent::Ready => {
                 self.push_block(cx, ChatBlock::Info("\u{2713} Connected to rho".into()));
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.get_state();
+                    let _ = agent.list_models();
+                }
             }
             RhoEvent::AgentStart => {
                 self.set_busy(cx, true);
@@ -814,6 +973,10 @@ impl App {
                 self.usage.util = utilization;
                 self.update_usage(cx);
             }
+            RhoEvent::Response { kind, result } => self.handle_response(cx, kind, result),
+            RhoEvent::RequestError { kind, error } => {
+                self.push_block(cx, ChatBlock::Info(format!("\u{26a0} {:?} failed: {}", kind, error)));
+            }
             RhoEvent::Closed => {
                 self.push_block(cx, ChatBlock::Info("rho process exited.".into()));
                 self.agent = None;
@@ -850,23 +1013,37 @@ impl MatchEvent for App {
         }
 
         if ui.button(cx, ids!(btn_session)).clicked(actions) {
-            self.push_block(cx, ChatBlock::Info("Session picker not yet connected to backend.".into()));
-            return;
-        }
-
-        if ui.button(cx, ids!(btn_model)).clicked(actions) {
-            self.push_block(cx, ChatBlock::Info("Model picker not yet connected to backend.".into()));
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.list_sessions();
+            } else {
+                self.push_block(cx, ChatBlock::Info("not connected.".into()));
+            }
             return;
         }
 
         if ui.button(cx, ids!(btn_resume)).clicked(actions) {
-            self.push_block(cx, ChatBlock::Info("Resume not yet connected to backend.".into()));
+            self.push_block(cx, ChatBlock::Info("Resume: pick a session from the Session list (click-to-resume is a later slice).".into()));
             return;
         }
 
         if ui.button(cx, ids!(btn_providers)).clicked(actions) {
-            self.push_block(cx, ChatBlock::Info("Providers picker not yet connected to backend.".into()));
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.list_providers();
+            } else {
+                self.push_block(cx, ChatBlock::Info("not connected.".into()));
+            }
             return;
+        }
+
+        // ── Model dropdown: pick a model -> setModel ──
+        if let Some(idx) = self.ui.drop_down(cx, ids!(model_dropdown)).selected(actions) {
+            if let Some(model) = self.models.get(idx).cloned() {
+                if self.current_model.as_deref() != Some(model.as_str()) {
+                    if let Some(agent) = &mut self.agent {
+                        let _ = agent.set_model(&model);
+                    }
+                }
+            }
         }
 
         // ── TextInput: Enter to submit ──
