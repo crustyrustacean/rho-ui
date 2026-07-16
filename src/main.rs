@@ -15,7 +15,6 @@ app_main!(App);
 // `aichat` example's CHAT_DATA pattern.
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 enum ChatBlock {
     /// A user-submitted message.
     User(String),
@@ -37,11 +36,11 @@ enum ChatBlock {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 enum ToolStatus {
     Pending,
     Success,
     Error,
+    Denied,
 }
 
 static CHAT_BLOCKS: RwLock<Vec<ChatBlock>> = RwLock::new(Vec::new());
@@ -68,6 +67,18 @@ enum RhoEvent {
     MessageDelta { delta: String },
     ReasoningDelta { delta: String },
     StateChange { state: String },
+    ToolCall { name: String, arguments: String },
+    ToolResult { name: String, is_error: bool, output: String },
+    ToolDenied { name: String },
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_tokens: u64,
+        cost: f64,
+        context_used: u64,
+        context_window: u64,
+        utilization: u8,
+    },
     Closed,
 }
 
@@ -176,25 +187,58 @@ fn parse_event(line: &str) -> Option<RhoEvent> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let method = v.get("method")?.as_str()?;
     let p = v.get("params");
-    let s = |k: &str| {
-        p.and_then(|p| p.get(k))
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
     Some(match method {
         "ready" => RhoEvent::Ready,
         "agent/start" => RhoEvent::AgentStart,
         "agent/end" => RhoEvent::AgentEnd {
-            reply: s("reply"),
-            duration_ms: p.and_then(|p| p.get("durationMs")).and_then(|x| x.as_u64()).unwrap_or(0),
+            reply: jstr(p, "reply"),
+            duration_ms: ju64(p, "durationMs"),
         },
-        "agent/error" => RhoEvent::AgentError { error: s("error") },
-        "message/delta" => RhoEvent::MessageDelta { delta: s("delta") },
-        "reasoning/delta" => RhoEvent::ReasoningDelta { delta: s("delta") },
-        "state/change" => RhoEvent::StateChange { state: s("state") },
+        "agent/error" => RhoEvent::AgentError { error: jstr(p, "error") },
+        "message/delta" => RhoEvent::MessageDelta { delta: jstr(p, "delta") },
+        "reasoning/delta" => RhoEvent::ReasoningDelta { delta: jstr(p, "delta") },
+        "state/change" => RhoEvent::StateChange { state: jstr(p, "state") },
+        "tool/call" => RhoEvent::ToolCall {
+            name: jstr(p, "name"),
+            arguments: jstr(p, "arguments"),
+        },
+        "tool/result" => RhoEvent::ToolResult {
+            name: jstr(p, "name"),
+            is_error: jbool(p, "isError"),
+            output: jstr(p, "output"),
+        },
+        "tool/denied" => RhoEvent::ToolDenied { name: jstr(p, "name") },
+        "usage" => {
+            let u = p.and_then(|p| p.get("usage"));
+            let c = p.and_then(|p| p.get("context"));
+            RhoEvent::Usage {
+                input_tokens: ju64(u, "inputTokens"),
+                output_tokens: ju64(u, "outputTokens"),
+                cached_tokens: ju64(u, "cachedTokens"),
+                cost: jf64(u, "cost"),
+                context_used: ju64(c, "estimatedUsed"),
+                context_window: ju64(c, "contextWindow"),
+                utilization: ju64(c, "utilizationPercent").min(255) as u8,
+            }
+        }
         _ => return None,
     })
+}
+
+fn jstr(p: Option<&serde_json::Value>, k: &str) -> String {
+    p.and_then(|p| p.get(k))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+fn ju64(p: Option<&serde_json::Value>, k: &str) -> u64 {
+    p.and_then(|p| p.get(k)).and_then(|x| x.as_u64()).unwrap_or(0)
+}
+fn jf64(p: Option<&serde_json::Value>, k: &str) -> f64 {
+    p.and_then(|p| p.get(k)).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+fn jbool(p: Option<&serde_json::Value>, k: &str) -> bool {
+    p.and_then(|p| p.get(k)).and_then(|x| x.as_bool()).unwrap_or(false)
 }
 
 fn format_secs(ms: u64) -> String {
@@ -225,6 +269,29 @@ fn finalize_reasoning(elapsed_secs: String) {
             *last = ChatBlock::Reasoning { text: owned, elapsed_secs };
         }
     }
+}
+
+/// Finalize the most recent pending ToolCall with `name` (rho's loop is
+/// sequential, so there's at most one in flight per name). If none is found,
+/// push a finalized block as a defensive fallback.
+fn finalize_tool_call(name: &str, status: ToolStatus, output: Option<String>) {
+    let mut blocks = CHAT_BLOCKS.write().unwrap();
+    for block in blocks.iter_mut().rev() {
+        if let ChatBlock::ToolCall { name: n, status: st, output: out, .. } = block {
+            if n == name && matches!(st, ToolStatus::Pending) {
+                *st = status;
+                *out = output;
+                return;
+            }
+        }
+    }
+    drop(blocks);
+    CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
+        name: name.to_string(),
+        args: String::new(),
+        status,
+        output,
+    });
 }
 
 // ── ChatScroll: a PortalList-driven scrollback ──────────────────────────────
@@ -290,6 +357,7 @@ impl Widget for ChatScroll {
                                     ToolStatus::Success => (id!(ToolDone), "✓ done"),
                                     ToolStatus::Pending => (id!(ToolRun), "⟳ running"),
                                     ToolStatus::Error => (id!(ToolFail), "✗ failed"),
+                                    ToolStatus::Denied => (id!(ToolRun), "⊘ denied"),
                                 };
                                 let w = list.item(cx, item_id, template);
                                 w.label(cx, ids!(head))
@@ -612,6 +680,19 @@ pub struct App {
     agent: Option<RhoAgent>,
     #[rust]
     busy: bool,
+    #[rust]
+    usage: UsageState,
+}
+
+#[derive(Default)]
+struct UsageState {
+    input: u64,
+    output: u64,
+    cached: u64,
+    cost: f64,
+    ctx_used: u64,
+    ctx_window: u64,
+    util: u8,
 }
 
 impl App {
@@ -634,6 +715,28 @@ impl App {
     fn set_busy(&mut self, cx: &mut Cx, busy: bool) {
         self.busy = busy;
         self.ui.widget(cx, ids!(working)).set_visible(cx, busy);
+    }
+
+    /// Render the cumulative usage + live context snapshot into the footer.
+    fn update_usage(&self, cx: &mut Cx) {
+        let u = &self.usage;
+        let k = |n: u64| {
+            if n >= 1000 {
+                format!("{:.1}k", n as f64 / 1000.0)
+            } else {
+                n.to_string()
+            }
+        };
+        let win = if u.ctx_window >= 1000 {
+                format!("{:.0}k", u.ctx_window as f64 / 1000.0)
+            } else {
+                u.ctx_window.to_string()
+            };
+        let stats = format!(
+            "{} {} R{} ${:.3} {}/{}k(auto)",
+            k(u.input), k(u.output), k(u.cached), u.cost, u.util, win
+        );
+        self.ui.label(cx, ids!(footer_stats)).set_text(cx, &stats);
     }
 
     /// Map one rho JSON-RPC notification onto CHAT_BLOCKS / UI state.
@@ -673,6 +776,43 @@ impl App {
                 self.ui
                     .label(cx, ids!(working_text))
                     .set_text(cx, &format!("\u{2803} Working\u{2026} {}", state));
+            }
+            RhoEvent::ToolCall { name, arguments } => {
+                CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
+                    name,
+                    args: arguments,
+                    status: ToolStatus::Pending,
+                    output: None,
+                });
+                self.tail_and_redraw(cx);
+            }
+            RhoEvent::ToolResult { name, is_error, output } => {
+                let status = if is_error { ToolStatus::Error } else { ToolStatus::Success };
+                let output = if output.is_empty() { None } else { Some(output) };
+                finalize_tool_call(&name, status, output);
+                self.tail_and_redraw(cx);
+            }
+            RhoEvent::ToolDenied { name } => {
+                finalize_tool_call(&name, ToolStatus::Denied, Some("denied by approval gate".into()));
+                self.tail_and_redraw(cx);
+            }
+            RhoEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                cost,
+                context_used,
+                context_window,
+                utilization,
+            } => {
+                self.usage.input += input_tokens;
+                self.usage.output += output_tokens;
+                self.usage.cached += cached_tokens;
+                self.usage.cost += cost;
+                self.usage.ctx_used = context_used;
+                self.usage.ctx_window = context_window;
+                self.usage.util = utilization;
+                self.update_usage(cx);
             }
             RhoEvent::Closed => {
                 self.push_block(cx, ChatBlock::Info("rho process exited.".into()));
