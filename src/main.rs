@@ -1,7 +1,11 @@
 pub use makepad_widgets;
 
 use makepad_widgets::*;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc;
 use std::sync::RwLock;
+use std::thread;
 
 app_main!(App);
 
@@ -11,6 +15,7 @@ app_main!(App);
 // `aichat` example's CHAT_DATA pattern.
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum ChatBlock {
     /// A user-submitted message.
     User(String),
@@ -32,6 +37,7 @@ enum ChatBlock {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum ToolStatus {
     Pending,
     Success,
@@ -39,6 +45,187 @@ enum ToolStatus {
 }
 
 static CHAT_BLOCKS: RwLock<Vec<ChatBlock>> = RwLock::new(Vec::new());
+
+// ── rho agent bridge ────────────────────────────────────────────────────────
+// rho-coding-agent runs as a headless JSON-RPC 2.0 server over stdio. We spawn
+// it as a child process, read stdout/stderr on background threads into an mpsc
+// channel, and wake makepad's event loop with `SignalToUI::set_ui_signal()` —
+// the same pattern makepad_ai's claude_code backend uses. On each `Event::Signal`
+// tick we drain the channel, parse JSON-RPC notifications, and App maps them onto
+// CHAT_BLOCKS.
+enum RhoOutput {
+    Stdout(String),
+    Stderr(String),
+    StdoutClosed,
+}
+
+#[derive(Clone, Debug)]
+enum RhoEvent {
+    Ready,
+    AgentStart,
+    AgentEnd { reply: String, duration_ms: u64 },
+    AgentError { error: String },
+    MessageDelta { delta: String },
+    ReasoningDelta { delta: String },
+    StateChange { state: String },
+    Closed,
+}
+
+pub struct RhoAgent {
+    _child: Child,
+    stdin: ChildStdin,
+    receiver: mpsc::Receiver<RhoOutput>,
+    next_id: u64,
+}
+
+impl RhoAgent {
+    /// Spawn `rho` (from `RHO_PATH`, else PATH) with piped stdio and start the
+    /// reader threads. Returns Err if the binary can't be launched.
+    fn spawn() -> Result<Self, String> {
+        let program = std::env::var("RHO_PATH").unwrap_or_else(|_| "rho".to_string());
+        let mut child = Command::new(&program)
+            .arg("--accept-external-provider")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("{}: {}", program, e))?;
+        let stdin = child.stdin.take().ok_or("no stdin")?;
+        let stdout = child.stdout.take().ok_or("no stdout")?;
+        let stderr = child.stderr.take().ok_or("no stderr")?;
+
+        let (tx, rx) = mpsc::channel::<RhoOutput>();
+
+        let tx_out = tx.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => {
+                        if tx_out.send(RhoOutput::Stdout(line)).is_err() {
+                            break;
+                        }
+                        SignalToUI::set_ui_signal();
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = tx_out.send(RhoOutput::StdoutClosed);
+            SignalToUI::set_ui_signal();
+        });
+
+        let tx_err = tx;
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                match line {
+                    Ok(line) => {
+                        if tx_err.send(RhoOutput::Stderr(line)).is_err() {
+                            break;
+                        }
+                        SignalToUI::set_ui_signal();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Ok(Self { _child: child, stdin, receiver: rx, next_id: 0 })
+    }
+
+    /// Drain queued subprocess output, parsing stdout lines into events.
+    fn drain(&mut self) -> Vec<RhoEvent> {
+        let mut events = Vec::new();
+        while let Ok(out) = self.receiver.try_recv() {
+            match out {
+                RhoOutput::Stdout(line) => {
+                    if let Some(ev) = parse_event(&line) {
+                        events.push(ev);
+                    }
+                }
+                RhoOutput::Stderr(line) => eprintln!("[rho] {}", line),
+                RhoOutput::StdoutClosed => events.push(RhoEvent::Closed),
+            }
+        }
+        events
+    }
+
+    fn send_request(&mut self, method: &str, params: serde_json::Value) -> Result<(), String> {
+        self.next_id += 1;
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": self.next_id,
+        });
+        writeln!(self.stdin, "{}", line).map_err(|e| e.to_string())?;
+        self.stdin.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn prompt(&mut self, message: &str) -> Result<(), String> {
+        self.send_request("prompt", serde_json::json!({ "message": message }))
+    }
+
+    fn abort(&mut self) -> Result<(), String> {
+        self.send_request("abort", serde_json::json!({}))
+    }
+}
+
+/// Parse one stdout line as a JSON-RPC notification -> RhoEvent.
+/// Responses (have `result`/`error`, no `method`) are ignored.
+fn parse_event(line: &str) -> Option<RhoEvent> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let method = v.get("method")?.as_str()?;
+    let p = v.get("params");
+    let s = |k: &str| {
+        p.and_then(|p| p.get(k))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    Some(match method {
+        "ready" => RhoEvent::Ready,
+        "agent/start" => RhoEvent::AgentStart,
+        "agent/end" => RhoEvent::AgentEnd {
+            reply: s("reply"),
+            duration_ms: p.and_then(|p| p.get("durationMs")).and_then(|x| x.as_u64()).unwrap_or(0),
+        },
+        "agent/error" => RhoEvent::AgentError { error: s("error") },
+        "message/delta" => RhoEvent::MessageDelta { delta: s("delta") },
+        "reasoning/delta" => RhoEvent::ReasoningDelta { delta: s("delta") },
+        "state/change" => RhoEvent::StateChange { state: s("state") },
+        _ => return None,
+    })
+}
+
+fn format_secs(ms: u64) -> String {
+    format!("{:.1}s", ms as f64 / 1000.0)
+}
+
+// Streaming helpers: append into the trailing block of the right kind, creating
+// it when the kind changes, so consecutive deltas accumulate into one block.
+fn append_streaming_response(delta: &str) {
+    let mut blocks = CHAT_BLOCKS.write().unwrap();
+    match blocks.last_mut() {
+        Some(ChatBlock::Response(text)) => text.push_str(delta),
+        _ => blocks.push(ChatBlock::Response(delta.to_string())),
+    }
+}
+fn append_streaming_reasoning(delta: &str) {
+    let mut blocks = CHAT_BLOCKS.write().unwrap();
+    match blocks.last_mut() {
+        Some(ChatBlock::ReasoningStreaming { text }) => text.push_str(delta),
+        _ => blocks.push(ChatBlock::ReasoningStreaming { text: delta.to_string() }),
+    }
+}
+fn finalize_reasoning(elapsed_secs: String) {
+    let mut blocks = CHAT_BLOCKS.write().unwrap();
+    if let Some(last) = blocks.last_mut() {
+        if let ChatBlock::ReasoningStreaming { text } = last {
+            let owned = std::mem::take(text);
+            *last = ChatBlock::Reasoning { text: owned, elapsed_secs };
+        }
+    }
+}
 
 // ── ChatScroll: a PortalList-driven scrollback ──────────────────────────────
 // Each ChatBlock variant maps to a named item template declared in the script
@@ -343,6 +530,7 @@ script_mod! {
 
                     // ── 4. Working line (transient, shown during agent turn) ──
                     working := SolidView{
+                        visible: false
                         width: Fill height: Fit
                         padding: Inset{top: 4, right: 12, bottom: 4, left: 12}
                         draw_bg.color: #x0f0f12
@@ -420,6 +608,10 @@ script_mod! {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    #[rust]
+    agent: Option<RhoAgent>,
+    #[rust]
+    busy: bool,
 }
 
 impl App {
@@ -437,6 +629,57 @@ impl App {
     fn push_block(&self, cx: &mut Cx, block: ChatBlock) {
         CHAT_BLOCKS.write().unwrap().push(block);
         self.tail_and_redraw(cx);
+    }
+
+    fn set_busy(&mut self, cx: &mut Cx, busy: bool) {
+        self.busy = busy;
+        self.ui.widget(cx, ids!(working)).set_visible(cx, busy);
+    }
+
+    /// Map one rho JSON-RPC notification onto CHAT_BLOCKS / UI state.
+    fn handle_rho_event(&mut self, cx: &mut Cx, ev: RhoEvent) {
+        match ev {
+            RhoEvent::Ready => {
+                self.push_block(cx, ChatBlock::Info("\u{2713} Connected to rho".into()));
+            }
+            RhoEvent::AgentStart => {
+                self.set_busy(cx, true);
+            }
+            RhoEvent::MessageDelta { delta } => {
+                append_streaming_response(&delta);
+                self.tail_and_redraw(cx);
+            }
+            RhoEvent::ReasoningDelta { delta } => {
+                append_streaming_reasoning(&delta);
+                self.tail_and_redraw(cx);
+            }
+            RhoEvent::AgentEnd { reply, duration_ms } => {
+                finalize_reasoning(format_secs(duration_ms));
+                // If nothing streamed, the final reply is our only text.
+                if !reply.is_empty() {
+                    let mut blocks = CHAT_BLOCKS.write().unwrap();
+                    if !matches!(blocks.last(), Some(ChatBlock::Response(_))) {
+                        blocks.push(ChatBlock::Response(reply));
+                    }
+                }
+                self.set_busy(cx, false);
+                self.tail_and_redraw(cx);
+            }
+            RhoEvent::AgentError { error } => {
+                self.push_block(cx, ChatBlock::Info(format!("\u{26a0} {}", error)));
+                self.set_busy(cx, false);
+            }
+            RhoEvent::StateChange { state } => {
+                self.ui
+                    .label(cx, ids!(working_text))
+                    .set_text(cx, &format!("\u{2803} Working\u{2026} {}", state));
+            }
+            RhoEvent::Closed => {
+                self.push_block(cx, ChatBlock::Info("rho process exited.".into()));
+                self.agent = None;
+                self.set_busy(cx, false);
+            }
+        }
     }
 }
 
@@ -456,7 +699,13 @@ impl MatchEvent for App {
         }
 
         if ui.button(cx, ids!(btn_abort)).clicked(actions) {
-            self.push_block(cx, ChatBlock::Info("abort requested".into()));
+            let connected = self.agent.is_some();
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.abort();
+            }
+            if !connected {
+                self.push_block(cx, ChatBlock::Info("nothing to abort.".into()));
+            }
             return;
         }
 
@@ -485,7 +734,18 @@ impl MatchEvent for App {
         if let Some((text, _mods)) = input.returned(actions) {
             if !text.is_empty() {
                 input.set_text(cx, "");
-                self.push_block(cx, ChatBlock::User(text.clone()));
+                CHAT_BLOCKS.write().unwrap().push(ChatBlock::User(text.clone()));
+                let send = match &mut self.agent {
+                    Some(agent) => agent.prompt(&text),
+                    None => Err("rho agent not connected.".into()),
+                };
+                if let Err(e) = send {
+                    CHAT_BLOCKS
+                        .write()
+                        .unwrap()
+                        .push(ChatBlock::Info(format!("\u{26a0} {}", e)));
+                }
+                self.tail_and_redraw(cx);
             }
             // Keep typing: submitting (or pressing Enter on an empty box) can drop key
             // focus, so re-assert it on the input every time.
@@ -504,39 +764,28 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
 
-        // On startup, seed the scrollback with sample content and tail to it.
+        // On startup, spawn the rho agent. The reader threads will wake us via
+        // SignalToUI when rho emits its `ready` notification.
         if let Event::Startup = event {
-            *CHAT_BLOCKS.write().unwrap() = vec![
-                ChatBlock::User("Review this project and gain context on it.".into()),
-                ChatBlock::Reasoning {
-                    text: "Let me explore the project structure and read the key files to understand what's going on.".into(),
-                    elapsed_secs: "2.3s".into(),
-                },
-                ChatBlock::Response("I've reviewed the project. It's a GUI frontend built with makepad, using the Script DSL. The layout is a three-region chat-style window with a header, middle content area, and footer.".into()),
-                ChatBlock::ToolCall {
-                    name: "read_file".into(),
-                    args: "src/main.rs".into(),
-                    status: ToolStatus::Success,
-                    output: Some("pub use makepad_widgets;\nuse makepad_widgets::*;\n\napp_main!(App);".into()),
-                },
-                ChatBlock::ToolCall {
-                    name: "cargo_check".into(),
-                    args: "".into(),
-                    status: ToolStatus::Pending,
-                    output: None,
-                },
-                ChatBlock::ToolCall {
-                    name: "edit_file".into(),
-                    args: "src/main.rs".into(),
-                    status: ToolStatus::Error,
-                    output: Some("error: hash mismatch at line 42".into()),
-                },
-                ChatBlock::User("Can you fix the compilation error?".into()),
-                ChatBlock::ReasoningStreaming {
-                    text: "The hash mismatch is because the file changed since it was last read. I need to re-read the file to get fresh hashes, then retry the edit.".into(),
-                },
-            ];
-            self.tail_and_redraw(cx);
+            self.push_block(cx, ChatBlock::Info("Starting rho\u{2026}".into()));
+            match RhoAgent::spawn() {
+                Ok(agent) => self.agent = Some(agent),
+                Err(e) => self.push_block(
+                    cx,
+                    ChatBlock::Info(format!(
+                        "\u{26a0} Could not start rho: {}\nSet RHO_PATH to the rho binary, or put rho on PATH.",
+                        e
+                    )),
+                ),
+            }
+        }
+
+        // Drain subprocess output the reader threads queued since the last Signal.
+        if let Event::Signal = event {
+            let events = self.agent.as_mut().map(|a| a.drain()).unwrap_or_default();
+            for ev in events {
+                self.handle_rho_event(cx, ev);
+            }
         }
     }
 }
