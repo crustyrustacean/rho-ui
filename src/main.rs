@@ -50,8 +50,6 @@ enum ChatBlock {
         risk: String,
         resolution: ApprovalResolution,
     },
-    /// A clickable previous-session entry (click to resume).
-    SessionEntry { path: String, entries: u64 },
     /// A system/info message (e.g. "switched model", "resumed session").
     Info(String),
 }
@@ -76,6 +74,9 @@ static CHAT_BLOCKS: RwLock<Vec<ChatBlock>> = RwLock::new(Vec::new());
 
 /// Models shown in the picker modal: (name, is_current).
 static MODELS: RwLock<Vec<(String, bool)>> = RwLock::new(Vec::new());
+
+/// Sessions shown in the picker modal: (path, entry_count).
+static SESSIONS: RwLock<Vec<(String, u64)>> = RwLock::new(Vec::new());
 
 // ── rho agent bridge ────────────────────────────────────────────────────────
 // rho-coding-agent runs as a headless JSON-RPC 2.0 server over stdio. We spawn
@@ -527,12 +528,6 @@ impl Widget for ChatScroll {
                                 }
                                 w.draw_all_unscoped(cx);
                             }
-                            ChatBlock::SessionEntry { path, entries } => {
-                                let w = list.item(cx, item_id, id!(SessionEntry));
-                                w.button(cx, ids!(btn))
-                                    .set_text(cx, &format!("\u{21bb} {} ({} entries)", path, entries));
-                                w.draw_all_unscoped(cx);
-                            }
                         }
                     }
                 }
@@ -570,6 +565,38 @@ impl Widget for ModelList {
                             name.clone()
                         };
                         w.button(cx, ids!(pick)).set_text(cx, &label);
+                        w.draw_all_unscoped(cx);
+                    }
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+// ── SessionList: a PortalList of sessions for the picker modal ───────────────
+// Same shape as ModelList: snapshots the global SESSIONS during draw.
+#[derive(Script, ScriptHook, Widget)]
+pub struct SessionList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for SessionList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let sessions = SESSIONS.read().unwrap().clone();
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, sessions.len());
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    if let Some((path, entries)) = sessions.get(item_id) {
+                        let w = list.item(cx, item_id, id!(row));
+                        w.button(cx, ids!(pick))
+                            .set_text(cx, &format!("\u{21bb} {} ({} entries)", path, entries));
                         w.draw_all_unscoped(cx);
                     }
                 }
@@ -742,19 +769,6 @@ script_mod! {
                 resolved := Label { width: Fit draw_text.color: #x9a9a9a draw_text.text_style.font_size: 12 }
             }
 
-            SessionEntry := View {
-                width: Fill height: Fit
-                margin: Inset{bottom: 2}
-                btn := Button {
-                    width: Fill height: Fit
-                    text: ""
-                    draw_bg.color: #x1e1e24
-                    draw_bg.color_hover: #x2a2a30
-                    draw_bg.color_down: #x15151a
-                    draw_text.color: #x9a9a9a
-                    draw_text.text_style.font_size: 12
-                }
-            }
         }
     }
 
@@ -780,6 +794,34 @@ script_mod! {
                     draw_bg.color_hover: #x2a2a30
                     draw_bg.color_down: #x15151a
                     draw_text.color: #xcacaca
+                    draw_text.text_style.font_size: 12
+                }
+            }
+        }
+    }
+
+    // SessionList wraps a PortalList whose single child is the per-row template.
+    let SessionList = #(SessionList::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        list := PortalList {
+            width: Fill
+            height: Fill
+            flow: Down
+            auto_tail: false
+            drag_scrolling: true
+            padding: Inset{top: 4 right: 4 bottom: 4 left: 4}
+
+            row := View {
+                width: Fill height: Fit
+                margin: Inset{bottom: 2}
+                pick := Button {
+                    width: Fill height: Fit
+                    text: ""
+                    draw_bg.color: #x1e1e24
+                    draw_bg.color_hover: #x2a2a30
+                    draw_bg.color_down: #x15151a
+                    draw_text.color: #x9a9a9a
                     draw_text.text_style.font_size: 12
                 }
             }
@@ -833,14 +875,6 @@ script_mod! {
                         }
                         btn_model := Button{
                             text: "Model"
-                            draw_bg.color: #x2a2a30
-                            draw_bg.color_hover: #x3a3a40
-                            draw_bg.color_down: #x1a1a20
-                            draw_text.color: #xcacaca
-                            draw_text.text_style.font_size: 12
-                        }
-                        btn_resume := Button{
-                            text: "Resume"
                             draw_bg.color: #x2a2a30
                             draw_bg.color_hover: #x3a3a40
                             draw_bg.color_down: #x1a1a20
@@ -980,6 +1014,32 @@ script_mod! {
                                     draw_bg.border_color: #x3a3a40
                                 }
                                 model_list := ModelList {
+                                    width: Fill
+                                    height: 340
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Session picker modal (overlay; scrollable list) ──
+                    session_modal := Modal{
+                        content +: {
+                            width: 520
+                            height: Fit
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fit
+                                padding: Inset{top: 10 right: 10 bottom: 10 left: 10}
+                                flow: Down spacing: 8
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "Resume session"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 13
+                                }
+                                session_list := SessionList {
                                     width: Fill
                                     height: 340
                                 }
@@ -1171,21 +1231,25 @@ impl App {
                 self.tail_and_redraw(cx);
             }
             RequestKind::ListSessions => {
-                let mut blocks = CHAT_BLOCKS.write().unwrap();
-                if let Some(arr) = result.get("sessions").and_then(|x| x.as_array()) {
-                    if arr.is_empty() {
-                        blocks.push(ChatBlock::Info("No previous sessions.".into()));
-                    } else {
-                        blocks.push(ChatBlock::Info("Click a session to resume:".into()));
-                        for s in arr {
-                            let path = jstr(Some(s), "path");
-                            let entries = ju64(Some(s), "entryCount");
-                            blocks.push(ChatBlock::SessionEntry { path, entries });
-                        }
+                let sessions: Vec<(String, u64)> = result
+                    .get("sessions")
+                    .and_then(|x| x.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|s| (jstr(Some(s), "path"), ju64(Some(s), "entryCount")))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if sessions.is_empty() {
+                    self.push_block(cx, ChatBlock::Info("No previous sessions.".into()));
+                } else {
+                    {
+                        let mut g = SESSIONS.write().unwrap();
+                        *g = sessions;
                     }
+                    self.ui.redraw(cx);
+                    self.ui.modal(cx, ids!(session_modal)).open(cx);
                 }
-                drop(blocks);
-                self.tail_and_redraw(cx);
             }
             RequestKind::ResumeSession => {
                 let model = jstr(Some(&result), "model");
@@ -1408,11 +1472,6 @@ impl MatchEvent for App {
             return;
         }
 
-        if ui.button(cx, ids!(btn_resume)).clicked(actions) {
-            self.push_block(cx, ChatBlock::Info("Resume: pick a session from the Session list (click-to-resume is a later slice).".into()));
-            return;
-        }
-
         if ui.button(cx, ids!(btn_providers)).clicked(actions) {
             if let Some(agent) = &mut self.agent {
                 let _ = agent.list_providers();
@@ -1455,10 +1514,28 @@ impl MatchEvent for App {
             }
         }
 
-        // ── Inline block actions: approval buttons + click-to-resume sessions ──
+        // Resume a session from the modal's list, then close.
+        let mut resumed: Option<String> = None;
+        {
+            let list = self.ui.widget(cx, ids!(session_list)).portal_list(cx, ids!(list));
+            for (item_id, item) in list.items_with_actions(actions) {
+                if item.button(cx, ids!(pick)).clicked(actions) {
+                    if let Some((path, _)) = SESSIONS.read().unwrap().get(item_id) {
+                        resumed = Some(path.clone());
+                    }
+                }
+            }
+        }
+        if let Some(path) = resumed {
+            self.ui.modal(cx, ids!(session_modal)).close(cx);
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.resume_session(&path);
+            }
+        }
+
+        // ── Inline block actions: approval buttons ──
         // Collect first, then act, so we don't mutate the portal list mid-iteration.
         let mut approvals: Vec<(usize, bool, Option<String>)> = Vec::new();
-        let mut resumes: Vec<String> = Vec::new();
         {
             let list = self.ui.widget(cx, ids!(chat_scroll)).portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
@@ -1472,24 +1549,10 @@ impl MatchEvent for App {
                     let msg = item.text_input(cx, ids!(redirect_input)).text();
                     approvals.push((item_id, false, Some(msg)));
                 }
-                if item.button(cx, ids!(btn)).clicked(actions) {
-                    let path = CHAT_BLOCKS.read().unwrap().get(item_id).and_then(|b| match b {
-                        ChatBlock::SessionEntry { path, .. } => Some(path.clone()),
-                        _ => None,
-                    });
-                    if let Some(p) = path {
-                        resumes.push(p);
-                    }
-                }
             }
         }
         for (idx, approved, msg) in approvals {
             self.resolve_approval(cx, idx, approved, msg);
-        }
-        for path in resumes {
-            if let Some(agent) = &mut self.agent {
-                let _ = agent.resume_session(&path);
-            }
         }
 
         // ── TextInput: Enter to submit ──
