@@ -905,6 +905,14 @@ script_mod! {
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
+                        btn_resume := Button{
+                            text: "Resume Last"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                        }
                         btn_model := Button{
                             text: "Model"
                             draw_bg.color: #x2a2a30
@@ -1088,6 +1096,60 @@ script_mod! {
                             }
                         }
                     }
+
+                    // ── Resume-last-session confirmation modal ──
+                    resume_confirm_modal := Modal{
+                        content +: {
+                            width: 460
+                            height: Fit
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fit
+                                padding: Inset{top: 14 right: 14 bottom: 14 left: 14}
+                                flow: Down spacing: 10
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "Resume last session?"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 14
+                                }
+                                resume_confirm_meta := Label{
+                                    width: Fill
+                                    text: ""
+                                    draw_text.color: #x9a9a9a
+                                    draw_text.text_style.font_size: 12
+                                }
+                                resume_confirm_path := Label{
+                                    width: Fill
+                                    text: ""
+                                    draw_text.color: #x7a7a7a
+                                    draw_text.text_style: theme.font_code{font_size: 12}
+                                }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    resume_confirm_cancel := Button{
+                                        text: "Cancel"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                    resume_confirm_ok := Button{
+                                        text: "Resume"
+                                        draw_bg.color: #x1a4a2a
+                                        draw_bg.color_hover: #x2a6a3a
+                                        draw_bg.color_down: #x0a3a1a
+                                        draw_text.color: #xeaeaea
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1116,6 +1178,10 @@ pub struct App {
     model_filter_text: String,
     #[rust]
     current_model: Option<String>,
+    #[rust]
+    resume_latest_requested: bool,
+    #[rust]
+    pending_resume_path: Option<String>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -1292,6 +1358,16 @@ impl App {
                 sessions.sort_by(|a, b| b.1.cmp(&a.1));
                 if sessions.is_empty() {
                     self.push_block(cx, ChatBlock::Info("No previous sessions.".into()));
+                } else if self.resume_latest_requested {
+                    // "Resume Last": confirm the most recent session before resuming.
+                    self.resume_latest_requested = false;
+                    let (path, mtime, entries) = sessions[0].clone();
+                    self.pending_resume_path = Some(path.clone());
+                    self.ui
+                        .label(cx, ids!(resume_confirm_meta))
+                        .set_text(cx, &format!("{} · {} entries", relative_time(mtime), entries));
+                    self.ui.label(cx, ids!(resume_confirm_path)).set_text(cx, &path);
+                    self.ui.modal(cx, ids!(resume_confirm_modal)).open(cx);
                 } else {
                     {
                         let mut g = SESSIONS.write().unwrap();
@@ -1515,6 +1591,17 @@ impl MatchEvent for App {
 
         if ui.button(cx, ids!(btn_session)).clicked(actions) {
             if let Some(agent) = &mut self.agent {
+                self.resume_latest_requested = false;
+                let _ = agent.list_sessions();
+            } else {
+                self.push_block(cx, ChatBlock::Info("not connected.".into()));
+            }
+            return;
+        }
+
+        if ui.button(cx, ids!(btn_resume)).clicked(actions) {
+            if let Some(agent) = &mut self.agent {
+                self.resume_latest_requested = true;
                 let _ = agent.list_sessions();
             } else {
                 self.push_block(cx, ChatBlock::Info("not connected.".into()));
@@ -1581,6 +1668,23 @@ impl MatchEvent for App {
             if let Some(agent) = &mut self.agent {
                 let _ = agent.resume_session(&path);
             }
+        }
+
+        // ── Resume-last-session confirmation modal ──
+        if ui.button(cx, ids!(resume_confirm_cancel)).clicked(actions) {
+            self.pending_resume_path = None;
+            self.ui.modal(cx, ids!(resume_confirm_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(resume_confirm_ok)).clicked(actions) {
+            self.ui.modal(cx, ids!(resume_confirm_modal)).close(cx);
+            if let Some(path) = self.pending_resume_path.take() {
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.resume_session(&path);
+                }
+            }
+        }
+        if self.ui.modal(cx, ids!(resume_confirm_modal)).dismissed(actions) {
+            self.pending_resume_path = None;
         }
 
         // ── Inline block actions: approval buttons ──
