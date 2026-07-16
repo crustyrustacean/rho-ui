@@ -32,6 +32,15 @@ enum ChatBlock {
         status: ToolStatus,
         output: Option<String>,
     },
+    /// A tool-approval prompt from the agent (blocks until we respond).
+    Approval {
+        tool: String,
+        arguments: String,
+        risk: String,
+        resolution: ApprovalResolution,
+    },
+    /// A clickable previous-session entry (click to resume).
+    SessionEntry { path: String, entries: u64 },
     /// A system/info message (e.g. "switched model", "resumed session").
     Info(String),
 }
@@ -41,6 +50,13 @@ enum ToolStatus {
     Pending,
     Success,
     Error,
+    Denied,
+}
+
+#[derive(Clone, Debug)]
+enum ApprovalResolution {
+    Pending,
+    Approved,
     Denied,
 }
 
@@ -82,6 +98,7 @@ enum RhoEvent {
     ToolCall { name: String, arguments: String },
     ToolResult { name: String, is_error: bool, output: String },
     ToolDenied { name: String },
+    ApprovalRequest { tool: String, arguments: String, risk: String },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -218,6 +235,11 @@ impl RhoAgent {
                 output: jstr(p, "output"),
             },
             "tool/denied" => RhoEvent::ToolDenied { name: jstr(p, "name") },
+            "approval/request" => RhoEvent::ApprovalRequest {
+                tool: jstr(p, "tool"),
+                arguments: jstr(p, "arguments"),
+                risk: jstr(p, "risk"),
+            },
             "usage" => {
                 let u = p.and_then(|p| p.get("usage"));
                 let c = p.and_then(|p| p.get("context"));
@@ -286,6 +308,16 @@ impl RhoAgent {
     }
     fn set_model(&mut self, model: &str) -> Result<(), String> {
         self.request(RequestKind::SetModel, "setModel", serde_json::json!({ "model": model }))
+    }
+    fn resume_session(&mut self, path: &str) -> Result<(), String> {
+        self.request(RequestKind::ResumeSession, "resumeSession", serde_json::json!({ "path": path }))
+    }
+    fn approval_response(&mut self, approved: bool, message: Option<String>) -> Result<(), String> {
+        let params = match message {
+            Some(m) => serde_json::json!({ "approved": approved, "message": m }),
+            None => serde_json::json!({ "approved": approved }),
+        };
+        self.fire("approvalResponse", params)
     }
 }
 
@@ -442,6 +474,34 @@ impl Widget for ChatScroll {
                                 w.label(cx, ids!(msg)).set_text(cx, text);
                                 w.draw_all_unscoped(cx);
                             }
+                            ChatBlock::Approval { tool, arguments, risk, resolution } => {
+                                let w = list.item(cx, item_id, id!(Approval));
+                                w.label(cx, ids!(head))
+                                    .set_text(cx, &format!("{} {} ({})", tool, arguments, risk));
+                                match resolution {
+                                    ApprovalResolution::Pending => {
+                                        w.widget(cx, ids!(buttons)).set_visible(cx, true);
+                                        w.widget(cx, ids!(resolved)).set_visible(cx, false);
+                                    }
+                                    ApprovalResolution::Approved => {
+                                        w.widget(cx, ids!(buttons)).set_visible(cx, false);
+                                        w.widget(cx, ids!(resolved)).set_visible(cx, true);
+                                        w.label(cx, ids!(resolved)).set_text(cx, "\u{2713} approved");
+                                    }
+                                    ApprovalResolution::Denied => {
+                                        w.widget(cx, ids!(buttons)).set_visible(cx, false);
+                                        w.widget(cx, ids!(resolved)).set_visible(cx, true);
+                                        w.label(cx, ids!(resolved)).set_text(cx, "\u{2717} denied");
+                                    }
+                                }
+                                w.draw_all_unscoped(cx);
+                            }
+                            ChatBlock::SessionEntry { path, entries } => {
+                                let w = list.item(cx, item_id, id!(SessionEntry));
+                                w.button(cx, ids!(btn))
+                                    .set_text(cx, &format!("\u{21bb} {} ({} entries)", path, entries));
+                                w.draw_all_unscoped(cx);
+                            }
                         }
                     }
                 }
@@ -555,6 +615,50 @@ script_mod! {
                 msg := Label {
                     width: Fill
                     draw_text.color: #x6a6a6a
+                    draw_text.text_style.font_size: 12
+                }
+            }
+
+            Approval := SolidView {
+                width: Fill height: Fit
+                margin: Inset{bottom: 4}
+                padding: Inset{top: 8 right: 8 bottom: 8 left: 8}
+                flow: Down spacing: 4
+                draw_bg.color: #x3a3000
+                head := Label { width: Fill draw_text.color: #xeaeaea draw_text.text_style.font_size: 13 }
+                buttons := View {
+                    width: Fill height: Fit
+                    flow: Right spacing: 6
+                    approve := Button {
+                        text: "Approve"
+                        draw_bg.color: #x1a4a2a
+                        draw_bg.color_hover: #x2a6a3a
+                        draw_bg.color_down: #x0a3a1a
+                        draw_text.color: #xeaeaea
+                        draw_text.text_style.font_size: 12
+                    }
+                    deny := Button {
+                        text: "Deny"
+                        draw_bg.color: #x5f1a1a
+                        draw_bg.color_hover: #x7f2a2a
+                        draw_bg.color_down: #x4a0a0a
+                        draw_text.color: #xeaeaea
+                        draw_text.text_style.font_size: 12
+                    }
+                }
+                resolved := Label { width: Fit draw_text.color: #x9a9a9a draw_text.text_style.font_size: 12 }
+            }
+
+            SessionEntry := View {
+                width: Fill height: Fit
+                margin: Inset{bottom: 2}
+                btn := Button {
+                    width: Fill height: Fit
+                    text: ""
+                    draw_bg.color: #x1e1e24
+                    draw_bg.color_hover: #x2a2a30
+                    draw_bg.color_down: #x15151a
+                    draw_text.color: #x9a9a9a
                     draw_text.text_style.font_size: 12
                 }
             }
@@ -850,11 +954,11 @@ impl App {
                     if arr.is_empty() {
                         blocks.push(ChatBlock::Info("No previous sessions.".into()));
                     } else {
-                        blocks.push(ChatBlock::Info(format!("Sessions ({}):", arr.len())));
+                        blocks.push(ChatBlock::Info("Click a session to resume:".into()));
                         for s in arr {
                             let path = jstr(Some(s), "path");
                             let entries = ju64(Some(s), "entryCount");
-                            blocks.push(ChatBlock::Info(format!("  {} ({} entries)", path, entries)));
+                            blocks.push(ChatBlock::SessionEntry { path, entries });
                         }
                     }
                 }
@@ -870,6 +974,24 @@ impl App {
                 self.push_block(cx, ChatBlock::Info(format!("\u{21bb} resumed session ({})", cwd)));
             }
         }
+    }
+
+    /// Resolve an in-scrollback approval prompt: update the block and tell rho.
+    fn resolve_approval(&mut self, cx: &mut Cx, index: usize, approved: bool) {
+        {
+            let mut blocks = CHAT_BLOCKS.write().unwrap();
+            if let Some(ChatBlock::Approval { resolution, .. }) = blocks.get_mut(index) {
+                *resolution = if approved {
+                    ApprovalResolution::Approved
+                } else {
+                    ApprovalResolution::Denied
+                };
+            }
+        }
+        if let Some(agent) = &mut self.agent {
+            let _ = agent.approval_response(approved, None);
+        }
+        self.tail_and_redraw(cx);
     }
 
     /// Render the cumulative usage + live context snapshot into the footer.
@@ -953,6 +1075,15 @@ impl App {
             }
             RhoEvent::ToolDenied { name } => {
                 finalize_tool_call(&name, ToolStatus::Denied, Some("denied by approval gate".into()));
+                self.tail_and_redraw(cx);
+            }
+            RhoEvent::ApprovalRequest { tool, arguments, risk } => {
+                CHAT_BLOCKS.write().unwrap().push(ChatBlock::Approval {
+                    tool,
+                    arguments,
+                    risk,
+                    resolution: ApprovalResolution::Pending,
+                });
                 self.tail_and_redraw(cx);
             }
             RhoEvent::Usage {
@@ -1043,6 +1174,39 @@ impl MatchEvent for App {
                         let _ = agent.set_model(&model);
                     }
                 }
+            }
+        }
+
+        // ── Inline block actions: approval buttons + click-to-resume sessions ──
+        // Collect first, then act, so we don't mutate the portal list mid-iteration.
+        let mut approvals: Vec<(usize, bool)> = Vec::new();
+        let mut resumes: Vec<String> = Vec::new();
+        {
+            let list = self.ui.widget(cx, ids!(chat_scroll)).portal_list(cx, ids!(list));
+            for (item_id, item) in list.items_with_actions(actions) {
+                if item.button(cx, ids!(approve)).clicked(actions) {
+                    approvals.push((item_id, true));
+                }
+                if item.button(cx, ids!(deny)).clicked(actions) {
+                    approvals.push((item_id, false));
+                }
+                if item.button(cx, ids!(btn)).clicked(actions) {
+                    let path = CHAT_BLOCKS.read().unwrap().get(item_id).and_then(|b| match b {
+                        ChatBlock::SessionEntry { path, .. } => Some(path.clone()),
+                        _ => None,
+                    });
+                    if let Some(p) = path {
+                        resumes.push(p);
+                    }
+                }
+            }
+        }
+        for (idx, approved) in approvals {
+            self.resolve_approval(cx, idx, approved);
+        }
+        for path in resumes {
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.resume_session(&path);
             }
         }
 
