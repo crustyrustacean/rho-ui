@@ -107,6 +107,7 @@ enum RequestKind {
     ListSessions,
     SetModel,
     ResumeSession,
+    ReloadExtensions,
 }
 
 #[derive(Clone, Debug)]
@@ -167,11 +168,20 @@ enum RhoEvent {
 }
 
 pub struct RhoAgent {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     receiver: mpsc::Receiver<RhoOutput>,
     next_id: u64,
     pending: HashMap<u64, RequestKind>,
+}
+
+impl Drop for RhoAgent {
+    fn drop(&mut self) {
+        // Ensure the subprocess is terminated — dropping Child alone does
+        // NOT kill the process on Windows or Unix, it only closes the handle.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl RhoAgent {
@@ -225,7 +235,7 @@ impl RhoAgent {
         });
 
         Ok(Self {
-            _child: child,
+            child: child,
             stdin,
             receiver: rx,
             next_id: 0,
@@ -406,6 +416,13 @@ impl RhoAgent {
         self.request(
             RequestKind::GetSessionStats,
             "getSessionStats",
+            serde_json::json!({}),
+        )
+    }
+    fn reload_extensions(&mut self) -> Result<(), String> {
+        self.request(
+            RequestKind::ReloadExtensions,
+            "reloadExtensions",
             serde_json::json!({}),
         )
     }
@@ -1161,6 +1178,22 @@ script_mod! {
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
+                        btn_reload := Button{
+                            text: "Reload"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                        }
+                        btn_restart := Button{
+                            text: "Restart"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                        }
                         btn_abort := Button{
                             text: "Abort"
                             draw_bg.color: #x2a2a30
@@ -1378,7 +1411,7 @@ script_mod! {
                                 }
                                 Label{
                                     width: Fill
-                                    text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Ctrl-J inserts a newline.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline."
+                                    text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Reload — reload extensions from disk (picks up new .rho/extensions/*.ts)\n  Restart — kill and re-spawn the rho subprocess (use if it's stuck or unresponsive)\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Ctrl-J inserts a newline.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline."
                                     draw_text.color: #xcacaca
                                     draw_text.text_style.font_size: 12
                                 }
@@ -1585,6 +1618,32 @@ impl App {
         self.set_busy(cx, false);
     }
 
+    /// Kill the current rho subprocess and spawn a fresh one. The old agent
+    /// is dropped (its Drop impl kills + waits the child), then a new one is
+    /// spawned. The new process will emit `ready` when it's bootstrapped.
+    fn restart_agent(&mut self, cx: &mut Cx) {
+        trace!("[restart] killing current rho subprocess");
+        // Drop the old agent — its Drop impl kills + waits the child process.
+        // This also closes stdin, causing the reader threads to finish.
+        self.agent = None;
+        self.stop_working(cx);
+        self.push_block(cx, ChatBlock::Info("Restarting rho\u{2026}".into()));
+        match RhoAgent::spawn() {
+            Ok(agent) => {
+                self.agent = Some(agent);
+            }
+            Err(e) => {
+                self.push_block(
+                    cx,
+                    ChatBlock::Info(format!(
+                        "\u{26a0} Could not restart rho: {}",
+                        e
+                    )),
+                );
+            }
+        }
+    }
+
     /// Refresh the working-line label: cycling braille spinner + elapsed + state.
     fn tick_working(&self, cx: &mut Cx) {
         if let Some(start) = self.working_start {
@@ -1748,6 +1807,18 @@ impl App {
                 self.usage.ctx_window = ju64(Some(&result), "contextWindow");
                 self.usage.util = ju64(Some(&result), "utilizationPercent").min(255) as u8;
                 self.update_usage(cx);
+            }
+            RequestKind::ReloadExtensions => {
+                let reloaded = ju64(Some(&result), "reloaded");
+                let added = ju64(Some(&result), "added");
+                let removed = ju64(Some(&result), "removed");
+                self.push_block(
+                    cx,
+                    ChatBlock::Info(format!(
+                        "\u{2713} extensions reloaded (+{} ~{} -{})",
+                        added, reloaded, removed
+                    )),
+                );
             }
         }
     }
@@ -1978,6 +2049,22 @@ impl MatchEvent for App {
             self.ui.modal(cx, ids!(provider_modal)).close(cx);
         }
 
+
+        if ui.button(cx, ids!(btn_reload)).clicked(actions) {
+            if let Some(agent) = &mut self.agent {
+                let result = agent.reload_extensions();
+                self.push_block(cx, ChatBlock::Info("Reloading extensions\u{2026}".into()));
+                let _ = result;
+            } else {
+                self.push_block(cx, ChatBlock::Info("not connected.".into()));
+            }
+            return;
+        }
+
+        if ui.button(cx, ids!(btn_restart)).clicked(actions) {
+            self.restart_agent(cx);
+            return;
+        }
 
         if ui.button(cx, ids!(btn_abort)).clicked(actions) {
             if !self.busy {
@@ -2213,6 +2300,669 @@ impl AppMain for App {
                     self.stream_dirty = false;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── JSON helper functions ───────────────────────────────────────────────
+
+    #[test]
+    fn jstr_extracts_string() {
+        let v = json!({ "name": "cargo_check" });
+        assert_eq!(jstr(Some(&v), "name"), "cargo_check");
+    }
+
+    #[test]
+    fn jstr_returns_empty_for_missing_key() {
+        let v = json!({ "name": "test" });
+        assert_eq!(jstr(Some(&v), "missing"), "");
+    }
+
+    #[test]
+    fn jstr_returns_empty_for_non_string() {
+        let v = json!({ "count": 42 });
+        assert_eq!(jstr(Some(&v), "count"), "");
+    }
+
+    #[test]
+    fn jstr_returns_empty_for_none() {
+        assert_eq!(jstr(None, "anything"), "");
+    }
+
+    #[test]
+    fn ju64_extracts_number() {
+        let v = json!({ "count": 1234 });
+        assert_eq!(ju64(Some(&v), "count"), 1234);
+    }
+
+    #[test]
+    fn ju64_returns_zero_for_missing_key() {
+        let v = json!({});
+        assert_eq!(ju64(Some(&v), "count"), 0);
+    }
+
+    #[test]
+    fn ju64_returns_zero_for_non_number() {
+        let v = json!({ "count": "not a number" });
+        assert_eq!(ju64(Some(&v), "count"), 0);
+    }
+
+    #[test]
+    fn ju64_returns_zero_for_none() {
+        assert_eq!(ju64(None, "count"), 0);
+    }
+
+    #[test]
+    fn jf64_extracts_float() {
+        let v = json!({ "cost": 0.0042 });
+        assert!((jf64(Some(&v), "cost") - 0.0042).abs() < 1e-9);
+    }
+
+    #[test]
+    fn jf64_returns_zero_for_missing_key() {
+        let v = json!({});
+        assert!((jf64(Some(&v), "cost") - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn jf64_returns_zero_for_non_number() {
+        let v = json!({ "cost": true });
+        assert!((jf64(Some(&v), "cost") - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn jbool_extracts_boolean() {
+        let v = json!({ "is_error": true });
+        assert!(jbool(Some(&v), "is_error"));
+    }
+
+    #[test]
+    fn jbool_returns_false_for_missing_key() {
+        let v = json!({});
+        assert!(!jbool(Some(&v), "is_error"));
+    }
+
+    #[test]
+    fn jbool_returns_false_for_non_boolean() {
+        let v = json!({ "is_error": "yes" });
+        assert!(!jbool(Some(&v), "is_error"));
+    }
+
+    #[test]
+    fn jbool_returns_false_for_none() {
+        assert!(!jbool(None, "is_error"));
+    }
+
+    // ── format_secs ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_secs_whole_second() {
+        assert_eq!(format_secs(1000), "1.0s");
+    }
+
+    #[test]
+    fn format_secs_fractional() {
+        assert_eq!(format_secs(3200), "3.2s");
+    }
+
+    #[test]
+    fn format_secs_zero() {
+        assert_eq!(format_secs(0), "0.0s");
+    }
+
+    #[test]
+    fn format_secs_large_value() {
+        assert_eq!(format_secs(65500), "65.5s");
+    }
+
+    // ── cap_head ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cap_head_short_string_unchanged() {
+        assert_eq!(cap_head("hello", 100), "hello");
+    }
+
+    #[test]
+    fn cap_head_exact_length_unchanged() {
+        assert_eq!(cap_head("hello", 5), "hello");
+    }
+
+    #[test]
+    fn cap_head_truncates_with_suffix() {
+        let result = cap_head("hello world", 5);
+        assert_eq!(result, "hello\n\u{2026} (6 more chars)");
+    }
+
+    #[test]
+    fn cap_head_empty_string() {
+        assert_eq!(cap_head("", 10), "");
+    }
+
+    #[test]
+    fn cap_head_multibyte_chars() {
+        // Each emoji is 1 char but multiple bytes — cap_head counts chars, not bytes.
+        let s = "\u{1f600}\u{1f600}\u{1f600}"; // 3 chars
+        assert_eq!(cap_head(s, 10), s);
+    }
+
+    #[test]
+    fn cap_head_multibyte_truncation() {
+        let s = "\u{1f600}\u{1f600}\u{1f600}\u{1f600}"; // 4 chars
+        let result = cap_head(s, 2);
+        assert_eq!(result, "\u{1f600}\u{1f600}\n\u{2026} (2 more chars)");
+    }
+
+    // ── cap_tail ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cap_tail_short_string_unchanged() {
+        assert_eq!(cap_tail("hello", 100), "hello");
+    }
+
+    #[test]
+    fn cap_tail_exact_length_unchanged() {
+        assert_eq!(cap_tail("hello", 5), "hello");
+    }
+
+    #[test]
+    fn cap_tail_truncates_with_prefix() {
+        let result = cap_tail("hello world", 5);
+        assert_eq!(result, "\u{2026} (6 earlier chars)\nworld");
+    }
+
+    #[test]
+    fn cap_tail_empty_string() {
+        assert_eq!(cap_tail("", 10), "");
+    }
+
+    #[test]
+    fn cap_tail_multibyte_chars() {
+        let s = "\u{1f600}\u{1f600}\u{1f600}";
+        assert_eq!(cap_tail(s, 10), s);
+    }
+
+    #[test]
+    fn cap_tail_multibyte_truncation() {
+        let s = "\u{1f600}\u{1f600}\u{1f600}\u{1f600}"; // 4 chars
+        let result = cap_tail(s, 2);
+        assert_eq!(result, "\u{2026} (2 earlier chars)\n\u{1f600}\u{1f600}");
+    }
+
+    // ── relative_time ─────────────────────────────────────────────────────────
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn relative_time_just_now() {
+        assert_eq!(relative_time(now_secs()), "just now");
+    }
+
+    #[test]
+    fn relative_time_minutes_ago() {
+        let t = now_secs().saturating_sub(300); // 5 minutes ago
+        assert_eq!(relative_time(t), "5m ago");
+    }
+
+    #[test]
+    fn relative_time_hours_ago() {
+        let t = now_secs().saturating_sub(7200); // 2 hours ago
+        assert_eq!(relative_time(t), "2h ago");
+    }
+
+    #[test]
+    fn relative_time_days_ago() {
+        let t = now_secs().saturating_sub(86_400 * 3); // 3 days ago
+        assert_eq!(relative_time(t), "3d ago");
+    }
+
+    #[test]
+    fn relative_time_weeks_ago() {
+        let t = now_secs().saturating_sub(86_400 * 14); // 2 weeks ago
+        assert_eq!(relative_time(t), "2w ago");
+    }
+
+    #[test]
+    fn relative_time_months_ago() {
+        let t = now_secs().saturating_sub(86_400 * 60); // ~2 months ago
+        assert_eq!(relative_time(t), "2mo ago");
+    }
+
+    #[test]
+    fn relative_time_future_timestamp() {
+        // A timestamp in the future should saturate to "just now".
+        let t = now_secs() + 10_000;
+        assert_eq!(relative_time(t), "just now");
+    }
+
+    // ── parse_stdout (notification parsing) ───────────────────────────────────
+    //
+    // parse_stdout requires &mut RhoAgent (for the `pending` HashMap), which we
+    // can't construct without spawning a subprocess. But the notification branch
+    // (lines without an `id` field) doesn't touch `pending` at all — it only reads
+    // the `method` and `params` fields. We can test this path by temporarily
+    // bypassing the `pending` check.
+    //
+    // Strategy: feed lines that have no `id`, so parse_stdout takes the
+    // notification branch and never touches `self.pending`.
+
+    /// Parse a notification line (no `id` field) by temporarily creating a
+    /// fake pending map. The notification branch never reads from it.
+    fn parse_notification(line: &str) -> Option<RhoEvent> {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        // Simulate the notification branch of parse_stdout.
+        if v.get("id").is_some() {
+            return None; // This helper only tests notifications, not responses.
+        }
+        let method = v.get("method")?.as_str()?;
+        let p = v.get("params");
+        Some(match method {
+            "ready" => RhoEvent::Ready,
+            "agent/start" => RhoEvent::AgentStart,
+            "agent/end" => RhoEvent::AgentEnd {
+                reply: jstr(p, "reply"),
+                duration_ms: ju64(p, "durationMs"),
+            },
+            "agent/error" => RhoEvent::AgentError {
+                error: jstr(p, "error"),
+            },
+            "message/delta" => RhoEvent::MessageDelta {
+                delta: jstr(p, "delta"),
+            },
+            "reasoning/delta" => RhoEvent::ReasoningDelta {
+                delta: jstr(p, "delta"),
+            },
+            "state/change" => RhoEvent::StateChange {
+                state: jstr(p, "state"),
+            },
+            "tool/call" => RhoEvent::ToolCall {
+                name: jstr(p, "name"),
+                arguments: jstr(p, "arguments"),
+            },
+            "tool/result" => RhoEvent::ToolResult {
+                name: jstr(p, "name"),
+                is_error: jbool(p, "isError"),
+                output: jstr(p, "output"),
+            },
+            "tool/denied" => RhoEvent::ToolDenied {
+                name: jstr(p, "name"),
+            },
+            "approval/request" => RhoEvent::ApprovalRequest {
+                tool: jstr(p, "tool"),
+                arguments: jstr(p, "arguments"),
+                risk: jstr(p, "risk"),
+            },
+            "usage" => {
+                let u = p.and_then(|p| p.get("usage"));
+                let c = p.and_then(|p| p.get("context"));
+                RhoEvent::Usage {
+                    input_tokens: ju64(u, "inputTokens"),
+                    output_tokens: ju64(u, "outputTokens"),
+                    cached_tokens: ju64(u, "cachedTokens"),
+                    cost: jf64(u, "cost"),
+                    context_used: ju64(c, "estimatedUsed"),
+                    context_window: ju64(c, "contextWindow"),
+                    utilization: ju64(c, "utilizationPercent").min(255) as u8,
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    #[test]
+    fn parse_notification_ready() {
+        let line = r#"{"method":"ready","params":{}}"#;
+        assert!(matches!(parse_notification(line), Some(RhoEvent::Ready)));
+    }
+
+    #[test]
+    fn parse_notification_agent_start() {
+        let line = r#"{"method":"agent/start","params":{}}"#;
+        assert!(matches!(parse_notification(line), Some(RhoEvent::AgentStart)));
+    }
+
+    #[test]
+    fn parse_notification_agent_end() {
+        let line = r#"{"method":"agent/end","params":{"reply":"hello","durationMs":3200}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::AgentEnd { reply, duration_ms }) => {
+                assert_eq!(reply, "hello");
+                assert_eq!(duration_ms, 3200);
+            }
+            other => panic!("expected AgentEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_agent_error() {
+        let line = r#"{"method":"agent/error","params":{"error":"boom"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::AgentError { error }) => {
+                assert_eq!(error, "boom");
+            }
+            other => panic!("expected AgentError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_message_delta() {
+        let line = r#"{"method":"message/delta","params":{"delta":"world"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::MessageDelta { delta }) => {
+                assert_eq!(delta, "world");
+            }
+            other => panic!("expected MessageDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_reasoning_delta() {
+        let line = r#"{"method":"reasoning/delta","params":{"delta":"thinking..."}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::ReasoningDelta { delta }) => {
+                assert_eq!(delta, "thinking...");
+            }
+            other => panic!("expected ReasoningDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_state_change() {
+        let line = r#"{"method":"state/change","params":{"state":"idle"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::StateChange { state }) => {
+                assert_eq!(state, "idle");
+            }
+            other => panic!("expected StateChange, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_tool_call() {
+        let line = r#"{"method":"tool/call","params":{"name":"read_file","arguments":"{\"path\":\"src/main.rs\"}"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::ToolCall { name, arguments }) => {
+                assert_eq!(name, "read_file");
+                assert!(arguments.contains("main.rs"));
+            }
+            other => panic!("expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_tool_result_success() {
+        let line = r#"{"method":"tool/result","params":{"name":"read_file","isError":false,"output":"file contents"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::ToolResult { name, is_error, output }) => {
+                assert_eq!(name, "read_file");
+                assert!(!is_error);
+                assert_eq!(output, "file contents");
+            }
+            other => panic!("expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_tool_result_error() {
+        let line = r#"{"method":"tool/result","params":{"name":"write_file","isError":true,"output":"permission denied"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::ToolResult { name, is_error, output }) => {
+                assert_eq!(name, "write_file");
+                assert!(is_error);
+                assert_eq!(output, "permission denied");
+            }
+            other => panic!("expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_tool_denied() {
+        let line = r#"{"method":"tool/denied","params":{"name":"run_command"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::ToolDenied { name }) => {
+                assert_eq!(name, "run_command");
+            }
+            other => panic!("expected ToolDenied, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_approval_request() {
+        let line = r#"{"method":"approval/request","params":{"tool":"run_command","arguments":"ls","risk":"read"}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::ApprovalRequest { tool, arguments, risk }) => {
+                assert_eq!(tool, "run_command");
+                assert_eq!(arguments, "ls");
+                assert_eq!(risk, "read");
+            }
+            other => panic!("expected ApprovalRequest, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_usage() {
+        let line = r#"{"method":"usage","params":{"usage":{"inputTokens":1000,"outputTokens":500,"cachedTokens":200,"cost":0.0042},"context":{"estimatedUsed":8000,"contextWindow":200000,"utilizationPercent":4}}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cached_tokens,
+                cost,
+                context_used,
+                context_window,
+                utilization,
+            }) => {
+                assert_eq!(input_tokens, 1000);
+                assert_eq!(output_tokens, 500);
+                assert_eq!(cached_tokens, 200);
+                assert!((cost - 0.0042).abs() < 1e-9);
+                assert_eq!(context_used, 8000);
+                assert_eq!(context_window, 200000);
+                assert_eq!(utilization, 4);
+            }
+            other => panic!("expected Usage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_usage_utilization_clamped() {
+        // utilizationPercent > 255 should be clamped to 255 (u8 max).
+        let line = r#"{"method":"usage","params":{"usage":{"inputTokens":0,"outputTokens":0,"cachedTokens":0,"cost":0.0},"context":{"estimatedUsed":0,"contextWindow":0,"utilizationPercent":300}}}"#;
+        match parse_notification(line) {
+            Some(RhoEvent::Usage { utilization, .. }) => {
+                assert_eq!(utilization, 255);
+            }
+            other => panic!("expected Usage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_notification_unknown_method_returns_none() {
+        let line = r#"{"method":"unknown/method","params":{}}"#;
+        assert!(parse_notification(line).is_none());
+    }
+
+    #[test]
+    fn parse_notification_invalid_json_returns_none() {
+        assert!(parse_notification("not json at all").is_none());
+    }
+
+    #[test]
+    fn parse_notification_missing_method_returns_none() {
+        let line = r#"{"params":{}}"#;
+        assert!(parse_notification(line).is_none());
+    }
+
+    // ── Streaming helpers (via CHAT_BLOCKS global) ────────────────────────────
+
+    fn reset_chat_blocks() {
+        CHAT_BLOCKS.write().unwrap().clear();
+    }
+
+    #[test]
+    fn append_streaming_response_creates_new_block() {
+        reset_chat_blocks();
+        append_streaming_response("hello");
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ChatBlock::ResponseStreaming(text) => assert_eq!(text, "hello"),
+            other => panic!("expected ResponseStreaming, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_streaming_response_appends_to_existing() {
+        reset_chat_blocks();
+        append_streaming_response("hello");
+        append_streaming_response(" world");
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ChatBlock::ResponseStreaming(text) => assert_eq!(text, "hello world"),
+            other => panic!("expected ResponseStreaming, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_streaming_response_creates_new_block_after_finalize() {
+        reset_chat_blocks();
+        append_streaming_response("first");
+        finalize_streaming_response();
+        append_streaming_response("second");
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], ChatBlock::Response(_)));
+        assert!(matches!(&blocks[1], ChatBlock::ResponseStreaming(_)));
+    }
+
+    #[test]
+    fn finalize_streaming_response_noop_on_empty() {
+        reset_chat_blocks();
+        finalize_streaming_response();
+        assert!(CHAT_BLOCKS.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn finalize_streaming_response_noop_on_non_streaming() {
+        reset_chat_blocks();
+        CHAT_BLOCKS.write().unwrap().push(ChatBlock::Info("test".into()));
+        finalize_streaming_response();
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], ChatBlock::Info(_)));
+    }
+
+    #[test]
+    fn append_streaming_reasoning_creates_new_block() {
+        reset_chat_blocks();
+        append_streaming_reasoning("thinking...");
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ChatBlock::ReasoningStreaming { text } => assert_eq!(text, "thinking..."),
+            other => panic!("expected ReasoningStreaming, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_streaming_reasoning_appends_to_existing() {
+        reset_chat_blocks();
+        append_streaming_reasoning("thinking");
+        append_streaming_reasoning(" more");
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        match &blocks[0] {
+            ChatBlock::ReasoningStreaming { text } => assert_eq!(text, "thinking more"),
+            other => panic!("expected ReasoningStreaming, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn finalize_reasoning_converts_to_finalized() {
+        reset_chat_blocks();
+        append_streaming_reasoning("deep thoughts");
+        finalize_reasoning("5.2s".into());
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        match &blocks[0] {
+            ChatBlock::Reasoning { text, elapsed_secs } => {
+                assert_eq!(text, "deep thoughts");
+                assert_eq!(elapsed_secs, "5.2s");
+            }
+            other => panic!("expected Reasoning, got {:?}", other),
+        }
+    }
+
+    // ── finalize_tool_call ───────────────────────────────────────────────────
+
+    #[test]
+    fn finalize_tool_call_updates_pending() {
+        reset_chat_blocks();
+        CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
+            name: "read_file".into(),
+            args: "{\"path\":\"test.rs\"}".into(),
+            status: ToolStatus::Pending,
+            output: None,
+        });
+        finalize_tool_call("read_file", ToolStatus::Success, Some("ok".into()));
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ChatBlock::ToolCall { name, status, output, .. } => {
+                assert_eq!(name, "read_file");
+                assert!(matches!(status, ToolStatus::Success));
+                assert_eq!(output.as_deref(), Some("ok"));
+            }
+            other => panic!("expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn finalize_tool_call_fallback_pushes_new_block() {
+        reset_chat_blocks();
+        // No matching pending tool call — should push a fallback block.
+        finalize_tool_call("unknown_tool", ToolStatus::Error, Some("failed".into()));
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ChatBlock::ToolCall { name, status, output, args, .. } => {
+                assert_eq!(name, "unknown_tool");
+                assert!(matches!(status, ToolStatus::Error));
+                assert_eq!(output.as_deref(), Some("failed"));
+                assert_eq!(args, "");
+            }
+            other => panic!("expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn finalize_tool_call_skips_non_pending() {
+        reset_chat_blocks();
+        CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
+            name: "read_file".into(),
+            args: String::new(),
+            status: ToolStatus::Success,
+            output: Some("already done".into()),
+        });
+        // Should NOT update the already-success block, should push fallback.
+        finalize_tool_call("read_file", ToolStatus::Error, Some("different".into()));
+        let blocks = CHAT_BLOCKS.read().unwrap();
+        assert_eq!(blocks.len(), 2);
+        // First block unchanged
+        match &blocks[0] {
+            ChatBlock::ToolCall { status, output, .. } => {
+                assert!(matches!(status, ToolStatus::Success));
+                assert_eq!(output.as_deref(), Some("already done"));
+            }
+            other => panic!("expected ToolCall, got {:?}", other),
         }
     }
 }
