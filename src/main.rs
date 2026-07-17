@@ -3,11 +3,11 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::time::Instant;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::sync::RwLock;
 use std::thread;
+use std::time::Instant;
 
 app_main!(App);
 
@@ -107,15 +107,39 @@ enum RequestKind {
 enum RhoEvent {
     Ready,
     AgentStart,
-    AgentEnd { reply: String, duration_ms: u64 },
-    AgentError { error: String },
-    MessageDelta { delta: String },
-    ReasoningDelta { delta: String },
-    StateChange { state: String },
-    ToolCall { name: String, arguments: String },
-    ToolResult { name: String, is_error: bool, output: String },
-    ToolDenied { name: String },
-    ApprovalRequest { tool: String, arguments: String, risk: String },
+    AgentEnd {
+        reply: String,
+        duration_ms: u64,
+    },
+    AgentError {
+        error: String,
+    },
+    MessageDelta {
+        delta: String,
+    },
+    ReasoningDelta {
+        delta: String,
+    },
+    StateChange {
+        state: String,
+    },
+    ToolCall {
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        name: String,
+        is_error: bool,
+        output: String,
+    },
+    ToolDenied {
+        name: String,
+    },
+    ApprovalRequest {
+        tool: String,
+        arguments: String,
+        risk: String,
+    },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -125,8 +149,14 @@ enum RhoEvent {
         context_window: u64,
         utilization: u8,
     },
-    Response { kind: RequestKind, result: serde_json::Value },
-    RequestError { kind: RequestKind, error: String },
+    Response {
+        kind: RequestKind,
+        result: serde_json::Value,
+    },
+    RequestError {
+        kind: RequestKind,
+        error: String,
+    },
     Closed,
 }
 
@@ -188,7 +218,13 @@ impl RhoAgent {
             }
         });
 
-        Ok(Self { _child: child, stdin, receiver: rx, next_id: 0, pending: HashMap::new() })
+        Ok(Self {
+            _child: child,
+            stdin,
+            receiver: rx,
+            next_id: 0,
+            pending: HashMap::new(),
+        })
     }
 
     /// Drain queued subprocess output, parsing stdout lines into events.
@@ -238,10 +274,18 @@ impl RhoAgent {
                 reply: jstr(p, "reply"),
                 duration_ms: ju64(p, "durationMs"),
             },
-            "agent/error" => RhoEvent::AgentError { error: jstr(p, "error") },
-            "message/delta" => RhoEvent::MessageDelta { delta: jstr(p, "delta") },
-            "reasoning/delta" => RhoEvent::ReasoningDelta { delta: jstr(p, "delta") },
-            "state/change" => RhoEvent::StateChange { state: jstr(p, "state") },
+            "agent/error" => RhoEvent::AgentError {
+                error: jstr(p, "error"),
+            },
+            "message/delta" => RhoEvent::MessageDelta {
+                delta: jstr(p, "delta"),
+            },
+            "reasoning/delta" => RhoEvent::ReasoningDelta {
+                delta: jstr(p, "delta"),
+            },
+            "state/change" => RhoEvent::StateChange {
+                state: jstr(p, "state"),
+            },
             "tool/call" => RhoEvent::ToolCall {
                 name: jstr(p, "name"),
                 arguments: jstr(p, "arguments"),
@@ -251,7 +295,9 @@ impl RhoAgent {
                 is_error: jbool(p, "isError"),
                 output: jstr(p, "output"),
             },
-            "tool/denied" => RhoEvent::ToolDenied { name: jstr(p, "name") },
+            "tool/denied" => RhoEvent::ToolDenied {
+                name: jstr(p, "name"),
+            },
             "approval/request" => RhoEvent::ApprovalRequest {
                 tool: jstr(p, "tool"),
                 arguments: jstr(p, "arguments"),
@@ -301,7 +347,12 @@ impl RhoAgent {
     fn fire(&mut self, method: &str, params: serde_json::Value) -> Result<(), String> {
         self.write_jsonrpc(method, params, None)
     }
-    fn request(&mut self, kind: RequestKind, method: &str, params: serde_json::Value) -> Result<(), String> {
+    fn request(
+        &mut self,
+        kind: RequestKind,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), String> {
         self.write_jsonrpc(method, params, Some(kind))
     }
 
@@ -318,19 +369,39 @@ impl RhoAgent {
         self.request(RequestKind::ListModels, "listModels", serde_json::json!({}))
     }
     fn list_providers(&mut self) -> Result<(), String> {
-        self.request(RequestKind::ListProviders, "listProviders", serde_json::json!({}))
+        self.request(
+            RequestKind::ListProviders,
+            "listProviders",
+            serde_json::json!({}),
+        )
     }
     fn list_sessions(&mut self) -> Result<(), String> {
-        self.request(RequestKind::ListSessions, "listSessions", serde_json::json!({}))
+        self.request(
+            RequestKind::ListSessions,
+            "listSessions",
+            serde_json::json!({}),
+        )
     }
     fn set_model(&mut self, model: &str) -> Result<(), String> {
-        self.request(RequestKind::SetModel, "setModel", serde_json::json!({ "model": model }))
+        self.request(
+            RequestKind::SetModel,
+            "setModel",
+            serde_json::json!({ "model": model }),
+        )
     }
     fn resume_session(&mut self, path: &str) -> Result<(), String> {
-        self.request(RequestKind::ResumeSession, "resumeSession", serde_json::json!({ "path": path }))
+        self.request(
+            RequestKind::ResumeSession,
+            "resumeSession",
+            serde_json::json!({ "path": path }),
+        )
     }
     fn get_session_stats(&mut self) -> Result<(), String> {
-        self.request(RequestKind::GetSessionStats, "getSessionStats", serde_json::json!({}))
+        self.request(
+            RequestKind::GetSessionStats,
+            "getSessionStats",
+            serde_json::json!({}),
+        )
     }
     fn approval_response(&mut self, approved: bool, message: Option<String>) -> Result<(), String> {
         let params = match message {
@@ -348,13 +419,19 @@ fn jstr(p: Option<&serde_json::Value>, k: &str) -> String {
         .to_string()
 }
 fn ju64(p: Option<&serde_json::Value>, k: &str) -> u64 {
-    p.and_then(|p| p.get(k)).and_then(|x| x.as_u64()).unwrap_or(0)
+    p.and_then(|p| p.get(k))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0)
 }
 fn jf64(p: Option<&serde_json::Value>, k: &str) -> f64 {
-    p.and_then(|p| p.get(k)).and_then(|x| x.as_f64()).unwrap_or(0.0)
+    p.and_then(|p| p.get(k))
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0)
 }
 fn jbool(p: Option<&serde_json::Value>, k: &str) -> bool {
-    p.and_then(|p| p.get(k)).and_then(|x| x.as_bool()).unwrap_or(false)
+    p.and_then(|p| p.get(k))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
 }
 
 fn format_secs(ms: u64) -> String {
@@ -407,7 +484,9 @@ fn append_streaming_reasoning(delta: &str) {
     let mut blocks = CHAT_BLOCKS.write().unwrap();
     match blocks.last_mut() {
         Some(ChatBlock::ReasoningStreaming { text }) => text.push_str(delta),
-        _ => blocks.push(ChatBlock::ReasoningStreaming { text: delta.to_string() }),
+        _ => blocks.push(ChatBlock::ReasoningStreaming {
+            text: delta.to_string(),
+        }),
     }
 }
 fn finalize_reasoning(elapsed_secs: String) {
@@ -415,7 +494,10 @@ fn finalize_reasoning(elapsed_secs: String) {
     if let Some(last) = blocks.last_mut() {
         if let ChatBlock::ReasoningStreaming { text } = last {
             let owned = std::mem::take(text);
-            *last = ChatBlock::Reasoning { text: owned, elapsed_secs };
+            *last = ChatBlock::Reasoning {
+                text: owned,
+                elapsed_secs,
+            };
         }
     }
 }
@@ -426,7 +508,13 @@ fn finalize_reasoning(elapsed_secs: String) {
 fn finalize_tool_call(name: &str, status: ToolStatus, output: Option<String>) {
     let mut blocks = CHAT_BLOCKS.write().unwrap();
     for block in blocks.iter_mut().rev() {
-        if let ChatBlock::ToolCall { name: n, status: st, output: out, .. } = block {
+        if let ChatBlock::ToolCall {
+            name: n,
+            status: st,
+            output: out,
+            ..
+        } = block
+        {
             if n == name && matches!(st, ToolStatus::Pending) {
                 *st = status;
                 *out = output;
@@ -501,7 +589,12 @@ impl Widget for ChatScroll {
                                 w.markdown(cx, ids!(msg)).set_text(cx, text);
                                 w.draw_all_unscoped(cx);
                             }
-                            ChatBlock::ToolCall { name, args, status, output } => {
+                            ChatBlock::ToolCall {
+                                name,
+                                args,
+                                status,
+                                output,
+                            } => {
                                 let (template, status_text) = match status {
                                     ToolStatus::Success => (id!(ToolDone), "✓ done"),
                                     ToolStatus::Pending => (id!(ToolRun), "⟳ running"),
@@ -527,7 +620,12 @@ impl Widget for ChatScroll {
                                 w.label(cx, ids!(msg)).set_text(cx, text);
                                 w.draw_all_unscoped(cx);
                             }
-                            ChatBlock::Approval { tool, arguments, risk, resolution } => {
+                            ChatBlock::Approval {
+                                tool,
+                                arguments,
+                                risk,
+                                resolution,
+                            } => {
                                 let w = list.item(cx, item_id, id!(Approval));
                                 w.label(cx, ids!(head))
                                     .set_text(cx, &format!("{} {} ({})", tool, arguments, risk));
@@ -544,8 +642,10 @@ impl Widget for ChatScroll {
                                     }
                                 };
                                 w.widget(cx, ids!(buttons)).set_visible(cx, show_actions);
-                                w.widget(cx, ids!(redirect_row)).set_visible(cx, show_actions);
-                                w.widget(cx, ids!(resolved)).set_visible(cx, resolved_text.is_some());
+                                w.widget(cx, ids!(redirect_row))
+                                    .set_visible(cx, show_actions);
+                                w.widget(cx, ids!(resolved))
+                                    .set_visible(cx, resolved_text.is_some());
                                 if let Some(t) = resolved_text {
                                     w.label(cx, ids!(resolved)).set_text(cx, &t);
                                 }
@@ -867,8 +967,11 @@ script_mod! {
                 window.inner_size: vec2(900, 640)
                 window.title: "rho"
                 body +: {
-                    width: Fill height: Fill
-                    flow: Down spacing: 0
+                    flow: Overlay
+
+                    content := View {
+                        width: Fill height: Fill
+                        flow: Down spacing: 0
 
                     // ── 1. Title bar ──
                     title_bar := SolidView{
@@ -1025,6 +1128,8 @@ script_mod! {
                             }
                         }
                     }
+
+                    } // content
 
                     // ── Model picker modal (overlay; scrollable list) ──
                     model_modal := Modal{
@@ -1206,7 +1311,10 @@ impl App {
     /// then stays pinned to the bottom as long as the user hasn't scrolled up.
     fn tail_and_redraw(&self, cx: &mut Cx) {
         let len = CHAT_BLOCKS.read().unwrap().len();
-        let list = self.ui.widget(cx, ids!(chat_scroll)).portal_list(cx, ids!(list));
+        let list = self
+            .ui
+            .widget(cx, ids!(chat_scroll))
+            .portal_list(cx, ids!(list));
         list.set_tail_range(true);
         list.set_first_id_and_scroll(len.saturating_sub(1), 0.0);
         self.ui.redraw(cx);
@@ -1243,7 +1351,7 @@ impl App {
     /// Refresh the working-line label: cycling braille spinner + elapsed + state.
     fn tick_working(&self, cx: &mut Cx) {
         if let Some(start) = self.working_start {
-            const SPINNER: [char; 10] = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let elapsed = start.elapsed();
             let ch = SPINNER[((elapsed.as_millis() / 80) as usize) % SPINNER.len()];
             let state = if self.working_state.is_empty() {
@@ -1251,9 +1359,10 @@ impl App {
             } else {
                 &self.working_state
             };
-            self.ui
-                .label(cx, ids!(working_text))
-                .set_text(cx, &format!("{} Working  {:.1}s  {}", ch, elapsed.as_secs_f64(), state));
+            self.ui.label(cx, ids!(working_text)).set_text(
+                cx,
+                &format!("{} Working  {:.1}s  {}", ch, elapsed.as_secs_f64(), state),
+            );
         }
     }
 
@@ -1363,10 +1472,13 @@ impl App {
                     self.resume_latest_requested = false;
                     let (path, mtime, entries) = sessions[0].clone();
                     self.pending_resume_path = Some(path.clone());
+                    self.ui.label(cx, ids!(resume_confirm_meta)).set_text(
+                        cx,
+                        &format!("{} · {} entries", relative_time(mtime), entries),
+                    );
                     self.ui
-                        .label(cx, ids!(resume_confirm_meta))
-                        .set_text(cx, &format!("{} · {} entries", relative_time(mtime), entries));
-                    self.ui.label(cx, ids!(resume_confirm_path)).set_text(cx, &path);
+                        .label(cx, ids!(resume_confirm_path))
+                        .set_text(cx, &path);
                     self.ui.modal(cx, ids!(resume_confirm_modal)).open(cx);
                 } else {
                     {
@@ -1383,7 +1495,10 @@ impl App {
                 self.current_model = Some(model.clone());
                 self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
                 self.ui.label(cx, ids!(footer_pwd)).set_text(cx, &cwd);
-                self.push_block(cx, ChatBlock::Info(format!("\u{21bb} resumed session ({})", cwd)));
+                self.push_block(
+                    cx,
+                    ChatBlock::Info(format!("\u{21bb} resumed session ({})", cwd)),
+                );
             }
             RequestKind::GetSessionStats => {
                 let api = result.get("apiUsage");
@@ -1415,7 +1530,10 @@ impl App {
         };
         {
             let mut blocks = CHAT_BLOCKS.write().unwrap();
-            if let Some(ChatBlock::Approval { resolution: res, .. }) = blocks.get_mut(index) {
+            if let Some(ChatBlock::Approval {
+                resolution: res, ..
+            }) = blocks.get_mut(index)
+            {
                 *res = resolution;
             }
         }
@@ -1439,13 +1557,18 @@ impl App {
             }
         };
         let win = if u.ctx_window >= 1000 {
-                format!("{:.0}k", u.ctx_window as f64 / 1000.0)
-            } else {
-                u.ctx_window.to_string()
-            };
+            format!("{:.0}k", u.ctx_window as f64 / 1000.0)
+        } else {
+            u.ctx_window.to_string()
+        };
         let stats = format!(
-            "{} {} R{} ${:.3} {}/{}k(auto)",
-            k(u.input), k(u.output), k(u.cached), u.cost, u.util, win
+            "{} {} R{} ${:.3} {}/{}(auto)",
+            k(u.input),
+            k(u.output),
+            k(u.cached),
+            u.cost,
+            u.util,
+            win
         );
         self.ui.label(cx, ids!(footer_stats)).set_text(cx, &stats);
     }
@@ -1513,17 +1636,37 @@ impl App {
                 });
                 self.tail_and_redraw(cx);
             }
-            RhoEvent::ToolResult { name, is_error, output } => {
-                let status = if is_error { ToolStatus::Error } else { ToolStatus::Success };
-                let output = if output.is_empty() { None } else { Some(output) };
+            RhoEvent::ToolResult {
+                name,
+                is_error,
+                output,
+            } => {
+                let status = if is_error {
+                    ToolStatus::Error
+                } else {
+                    ToolStatus::Success
+                };
+                let output = if output.is_empty() {
+                    None
+                } else {
+                    Some(output)
+                };
                 finalize_tool_call(&name, status, output);
                 self.tail_and_redraw(cx);
             }
             RhoEvent::ToolDenied { name } => {
-                finalize_tool_call(&name, ToolStatus::Denied, Some("denied by approval gate".into()));
+                finalize_tool_call(
+                    &name,
+                    ToolStatus::Denied,
+                    Some("denied by approval gate".into()),
+                );
                 self.tail_and_redraw(cx);
             }
-            RhoEvent::ApprovalRequest { tool, arguments, risk } => {
+            RhoEvent::ApprovalRequest {
+                tool,
+                arguments,
+                risk,
+            } => {
                 CHAT_BLOCKS.write().unwrap().push(ChatBlock::Approval {
                     tool,
                     arguments,
@@ -1552,7 +1695,10 @@ impl App {
             }
             RhoEvent::Response { kind, result } => self.handle_response(cx, kind, result),
             RhoEvent::RequestError { kind, error } => {
-                self.push_block(cx, ChatBlock::Info(format!("\u{26a0} {:?} failed: {}", kind, error)));
+                self.push_block(
+                    cx,
+                    ChatBlock::Info(format!("\u{26a0} {:?} failed: {}", kind, error)),
+                );
             }
             RhoEvent::Closed => {
                 self.push_block(cx, ChatBlock::Info("rho process exited.".into()));
@@ -1621,19 +1767,28 @@ impl MatchEvent for App {
         // ── Model picker modal: open, filter, pick ──
         if ui.button(cx, ids!(btn_model)).clicked(actions) {
             self.model_filter_text.clear();
-            self.ui.text_input(cx, ids!(model_filter_input)).set_text(cx, "");
+            self.ui
+                .text_input(cx, ids!(model_filter_input))
+                .set_text(cx, "");
             self.filtered_models = self.models.clone();
             self.sync_model_list(cx);
             self.ui.modal(cx, ids!(model_modal)).open(cx);
         }
-        if let Some(filter) = self.ui.text_input(cx, ids!(model_filter_input)).changed(actions) {
+        if let Some(filter) = self
+            .ui
+            .text_input(cx, ids!(model_filter_input))
+            .changed(actions)
+        {
             self.model_filter_text = filter;
             self.recompute_filtered_models(cx);
         }
         // Pick a model from the modal's list, then close.
         let mut picked: Option<String> = None;
         {
-            let list = self.ui.widget(cx, ids!(model_list)).portal_list(cx, ids!(list));
+            let list = self
+                .ui
+                .widget(cx, ids!(model_list))
+                .portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
                 if item.button(cx, ids!(pick)).clicked(actions) {
                     if let Some((name, _)) = MODELS.read().unwrap().get(item_id) {
@@ -1654,7 +1809,10 @@ impl MatchEvent for App {
         // Resume a session from the modal's list, then close.
         let mut resumed: Option<String> = None;
         {
-            let list = self.ui.widget(cx, ids!(session_list)).portal_list(cx, ids!(list));
+            let list = self
+                .ui
+                .widget(cx, ids!(session_list))
+                .portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
                 if item.button(cx, ids!(pick)).clicked(actions) {
                     if let Some((path, _, _)) = SESSIONS.read().unwrap().get(item_id) {
@@ -1683,7 +1841,11 @@ impl MatchEvent for App {
                 }
             }
         }
-        if self.ui.modal(cx, ids!(resume_confirm_modal)).dismissed(actions) {
+        if self
+            .ui
+            .modal(cx, ids!(resume_confirm_modal))
+            .dismissed(actions)
+        {
             self.pending_resume_path = None;
         }
 
@@ -1691,7 +1853,10 @@ impl MatchEvent for App {
         // Collect first, then act, so we don't mutate the portal list mid-iteration.
         let mut approvals: Vec<(usize, bool, Option<String>)> = Vec::new();
         {
-            let list = self.ui.widget(cx, ids!(chat_scroll)).portal_list(cx, ids!(list));
+            let list = self
+                .ui
+                .widget(cx, ids!(chat_scroll))
+                .portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
                 if item.button(cx, ids!(approve)).clicked(actions) {
                     approvals.push((item_id, true, None));
@@ -1714,7 +1879,10 @@ impl MatchEvent for App {
         if let Some((text, _mods)) = input.returned(actions) {
             if !text.is_empty() {
                 input.set_text(cx, "");
-                CHAT_BLOCKS.write().unwrap().push(ChatBlock::User(text.clone()));
+                CHAT_BLOCKS
+                    .write()
+                    .unwrap()
+                    .push(ChatBlock::User(text.clone()));
                 let send = match &mut self.agent {
                     Some(agent) => agent.prompt(&text),
                     None => Err("rho agent not connected.".into()),
