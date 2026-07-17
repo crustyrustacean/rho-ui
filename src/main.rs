@@ -34,7 +34,10 @@ enum ChatBlock {
     Reasoning { text: String, elapsed_secs: String },
     /// A streaming reasoning block (still thinking).
     ReasoningStreaming { text: String },
-    /// A plain-text response from the agent.
+    /// A streaming (in-progress) response — rendered as a cheap Label, not
+    /// markdown, so appending deltas doesn't re-parse on every redraw.
+    ResponseStreaming(String),
+    /// A finalized response from the agent, rendered as markdown.
     Response(String),
     /// A tool call block with status.
     ToolCall {
@@ -77,6 +80,9 @@ static MODELS: RwLock<Vec<(String, bool)>> = RwLock::new(Vec::new());
 
 /// Sessions shown in the picker modal: (path, mtime_secs, entry_count).
 static SESSIONS: RwLock<Vec<(String, u64, u64)>> = RwLock::new(Vec::new());
+
+/// Providers shown in the picker modal: (name, reachable, active, is_external).
+static PROVIDERS: RwLock<Vec<(String, bool, bool, bool)>> = RwLock::new(Vec::new());
 
 // ── rho agent bridge ────────────────────────────────────────────────────────
 // rho-coding-agent runs as a headless JSON-RPC 2.0 server over stdio. We spawn
@@ -356,8 +362,8 @@ impl RhoAgent {
         self.write_jsonrpc(method, params, Some(kind))
     }
 
-    fn prompt(&mut self, message: &str) -> Result<(), String> {
-        self.fire("prompt", serde_json::json!({ "message": message }))
+    fn prompt(&mut self, message: &str, steer: bool) -> Result<(), String> {
+        self.fire("prompt", serde_json::json!({ "message": message, "steer": steer }))
     }
     fn abort(&mut self) -> Result<(), String> {
         self.fire("abort", serde_json::json!({}))
@@ -476,8 +482,44 @@ fn relative_time(secs: u64) -> String {
 fn append_streaming_response(delta: &str) {
     let mut blocks = CHAT_BLOCKS.write().unwrap();
     match blocks.last_mut() {
-        Some(ChatBlock::Response(text)) => text.push_str(delta),
-        _ => blocks.push(ChatBlock::Response(delta.to_string())),
+        Some(ChatBlock::ResponseStreaming(text)) => text.push_str(delta),
+        _ => blocks.push(ChatBlock::ResponseStreaming(delta.to_string())),
+    }
+}
+
+/// Convert the trailing streaming response (cheap Label) into a finalized
+/// markdown Response. No-op if the last block isn't a streaming response.
+fn finalize_streaming_response() {
+    let mut blocks = CHAT_BLOCKS.write().unwrap();
+    if let Some(last) = blocks.last_mut() {
+        if let ChatBlock::ResponseStreaming(text) = last {
+            let owned = std::mem::take(text);
+            *last = ChatBlock::Response(owned);
+        }
+    }
+}
+
+/// First `max` chars + a note when longer — keeps widget layout cheap when tool
+/// output / reasoning / a response is huge (the session had ~300KB tool results).
+fn cap_head(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{}\n\u{2026} ({} more chars)", head, count - max)
+    }
+}
+
+/// Last `max` chars (a tail window) so live streaming shows the newest text
+/// without laying out the whole growing string.
+fn cap_tail(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        s.to_string()
+    } else {
+        let tail: String = s.chars().skip(count - max).collect();
+        format!("\u{2026} ({} earlier chars)\n{}", count - max, tail)
     }
 }
 fn append_streaming_reasoning(delta: &str) {
@@ -575,18 +617,23 @@ impl Widget for ChatScroll {
                                 let w = list.item(cx, item_id, id!(Thought));
                                 w.label(cx, ids!(head))
                                     .set_text(cx, &format!("? thought · {}", elapsed_secs));
-                                w.label(cx, ids!(body)).set_text(cx, text);
+                                w.label(cx, ids!(body)).set_text(cx, &cap_head(text, 4000));
                                 w.draw_all_unscoped(cx);
                             }
                             ChatBlock::ReasoningStreaming { text } => {
                                 let w = list.item(cx, item_id, id!(Thought));
                                 w.label(cx, ids!(head)).set_text(cx, "? thinking");
-                                w.label(cx, ids!(body)).set_text(cx, text);
+                                w.label(cx, ids!(body)).set_text(cx, &cap_tail(text, 4000));
+                                w.draw_all_unscoped(cx);
+                            }
+                            ChatBlock::ResponseStreaming(text) => {
+                                let w = list.item(cx, item_id, id!(ResponseStreaming));
+                                w.label(cx, ids!(msg)).set_text(cx, &cap_tail(text, 4000));
                                 w.draw_all_unscoped(cx);
                             }
                             ChatBlock::Response(text) => {
                                 let w = list.item(cx, item_id, id!(Response));
-                                w.markdown(cx, ids!(msg)).set_text(cx, text);
+                                w.markdown(cx, ids!(msg)).set_text(cx, &cap_head(text, 4000));
                                 w.draw_all_unscoped(cx);
                             }
                             ChatBlock::ToolCall {
@@ -607,7 +654,7 @@ impl Widget for ChatScroll {
                                 match output {
                                     Some(out) => {
                                         w.widget(cx, ids!(out)).set_visible(cx, true);
-                                        w.label(cx, ids!(out)).set_text(cx, out);
+                                        w.label(cx, ids!(out)).set_text(cx, &cap_head(out, 4000));
                                     }
                                     None => {
                                         w.widget(cx, ids!(out)).set_visible(cx, false);
@@ -740,6 +787,44 @@ impl Widget for SessionList {
     }
 }
 
+// ── ProviderList: a PortalList of providers for the picker modal ────────
+// Same shape as ModelList: snapshots the global PROVIDERS during draw.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ProviderList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for ProviderList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let providers = PROVIDERS.read().unwrap().clone();
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, providers.len());
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    if let Some((name, reachable, active, is_external)) = providers.get(item_id) {
+                        let w = list.item(cx, item_id, id!(row));
+                        let state = if *reachable { "\u{2713}" } else { "\u{2717}" };
+                        let flags = match (active, is_external) {
+                            (true, true) => " [active, external]",
+                            (true, false) => " [active]",
+                            (false, true) => " [external]",
+                            (false, false) => "",
+                        };
+                        w.button(cx, ids!(pick)).set_text(cx, &format!("{} {}{}", name, state, flags));
+                        w.draw_all_unscoped(cx);
+                    }
+                }
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
 // ── The UI, in Script DSL ───────────────────────────────────────────────────
 // Layout (top → bottom):
 //   1. Title bar (Fit) — "rho" branding + subtitle.
@@ -801,6 +886,22 @@ script_mod! {
                     width: Fill
                     height: Fit
                     body: ""
+                    font_size: 13
+                    font_color: #xdcdcdc
+                    text_style_normal: theme.font_regular{font_size: 13}
+                    text_style_italic: theme.font_italic{font_size: 13}
+                    text_style_bold: theme.font_bold{font_size: 13}
+                    text_style_bold_italic: theme.font_bold_italic{font_size: 13}
+                    text_style_fixed: theme.font_code{font_size: 13}
+                    draw_text.color: #xdcdcdc
+                }
+            }
+
+            ResponseStreaming := View {
+                width: Fill height: Fit
+                margin: Inset{bottom: 8}
+                msg := Label {
+                    width: Fill
                     draw_text.color: #xdcdcdc
                     draw_text.text_style.font_size: 13
                 }
@@ -960,6 +1061,34 @@ script_mod! {
         }
     }
 
+    // ProviderList wraps a PortalList whose single child is the per-row template.
+    let ProviderList = #(ProviderList::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        list := PortalList {
+            width: Fill
+            height: Fill
+            flow: Down
+            auto_tail: false
+            drag_scrolling: true
+            padding: Inset{top: 4 right: 4 bottom: 4 left: 4}
+
+            row := View {
+                width: Fill height: Fit
+                margin: Inset{bottom: 2}
+                pick := Button {
+                    width: Fill height: Fit
+                    text: ""
+                    draw_bg.color: #x1e1e24
+                    draw_bg.color_hover: #x2a2a30
+                    draw_bg.color_down: #x15151a
+                    draw_text.color: #xcacaca
+                    draw_text.text_style.font_size: 12
+                }
+            }
+        }
+    }
+
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
@@ -1084,7 +1213,7 @@ script_mod! {
                         draw_bg.border_size: 1.0
                         draw_bg.border_color: #x4a4a4a
                         input_inner := TextInput{
-                            width: Fill height: 48
+                            width: Fill height: 80
                             padding: Inset{top: 8, right: 10, bottom: 8, left: 10}
                             empty_text: "Type a message... (Enter to send, Ctrl-J for newline)"
                             draw_text.color: #xdcdcdc
@@ -1100,7 +1229,7 @@ script_mod! {
                     footer := SolidView{
                         width: Fill height: Fit
                         padding: Inset{top: 6, right: 12, bottom: 6, left: 12}
-                        flow: Down spacing: 2
+                        flow: Down spacing: 4
                         draw_bg.color: #x1b1b20
 
                         // Line 1: cwd (git-branch)
@@ -1162,6 +1291,18 @@ script_mod! {
                                     width: Fill
                                     height: 340
                                 }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    model_close := Button{
+                                        text: "Close"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
                             }
                         }
                     }
@@ -1198,10 +1339,100 @@ script_mod! {
                                     width: Fill
                                     height: 340
                                 }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    session_close := Button{
+                                        text: "Close"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
                             }
                         }
                     }
 
+
+                    // ── Provider info modal (overlay; scrollable list) ──
+
+                    // ── Help modal ──
+                    help_modal := Modal{
+                        content +: {
+                            width: 480
+                            height: Fit
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fit
+                                padding: Inset{top: 14 right: 14 bottom: 14 left: 14}
+                                flow: Down spacing: 10
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "rho — quick reference"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 14
+                                }
+                                Label{
+                                    width: Fill
+                                    text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Ctrl-J inserts a newline.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline."
+                                    draw_text.color: #xcacaca
+                                    draw_text.text_style.font_size: 12
+                                }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    help_close := Button{
+                                        text: "Close"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    provider_modal := Modal{
+                        content +: {
+                            width: 460
+                            height: Fit
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fit
+                                padding: Inset{top: 10 right: 10 bottom: 10 left: 10}
+                                flow: Down spacing: 8
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "Providers"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 13
+                                }
+                                provider_list := ProviderList {
+                                    width: Fill
+                                    height: 340
+                                }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    provider_close := Button{
+                                        text: "Close"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // ── Resume-last-session confirmation modal ──
                     resume_confirm_modal := Modal{
                         content +: {
@@ -1293,6 +1524,10 @@ pub struct App {
     working_start: Option<Instant>,
     #[rust]
     working_state: String,
+    #[rust]
+    stream_dirty: bool,
+    #[rust]
+    last_tick: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -1322,6 +1557,7 @@ impl App {
 
     /// Push a block, jump to newest, redraw.
     fn push_block(&self, cx: &mut Cx, block: ChatBlock) {
+        finalize_streaming_response();
         CHAT_BLOCKS.write().unwrap().push(block);
         self.tail_and_redraw(cx);
     }
@@ -1336,6 +1572,7 @@ impl App {
         trace!("[busy] -> true (agent/start)");
         self.working_start = Some(Instant::now());
         self.working_state.clear();
+        self.last_tick = Some(Instant::now());
         self.set_busy(cx, true);
         self.tick_working(cx);
         self.next_frame = cx.new_next_frame();
@@ -1426,26 +1663,27 @@ impl App {
                 self.push_block(cx, ChatBlock::Info(format!("\u{2192} model: {}", model)));
             }
             RequestKind::ListProviders => {
-                let mut blocks = CHAT_BLOCKS.write().unwrap();
+                let mut providers: Vec<(String, bool, bool, bool)> = Vec::new();
                 if let Some(arr) = result.get("providers").and_then(|x| x.as_array()) {
-                    blocks.push(ChatBlock::Info(format!("Providers ({}):", arr.len())));
                     for p in arr {
-                        let name = jstr(Some(p), "name");
-                        let reachable = jbool(Some(p), "reachable");
-                        let active = jbool(Some(p), "active");
-                        let ext = jbool(Some(p), "isExternal");
-                        let state = if reachable { "\u{2713}" } else { "\u{2717}" };
-                        let flags = match (active, ext) {
-                            (true, true) => " [active, external]",
-                            (true, false) => " [active]",
-                            (false, true) => " [external]",
-                            (false, false) => "",
-                        };
-                        blocks.push(ChatBlock::Info(format!("  {} {}{}", name, state, flags)));
+                        providers.push((
+                            jstr(Some(p), "name"),
+                            jbool(Some(p), "reachable"),
+                            jbool(Some(p), "active"),
+                            jbool(Some(p), "isExternal"),
+                        ));
                     }
                 }
-                drop(blocks);
-                self.tail_and_redraw(cx);
+                if providers.is_empty() {
+                    self.push_block(cx, ChatBlock::Info("No providers configured.".into()));
+                } else {
+                    {
+                        let mut g = PROVIDERS.write().unwrap();
+                        *g = providers;
+                    }
+                    self.ui.redraw(cx);
+                    self.ui.modal(cx, ids!(provider_modal)).open(cx);
+                }
             }
             RequestKind::ListSessions => {
                 let mut sessions: Vec<(String, u64, u64)> = result
@@ -1550,10 +1788,10 @@ impl App {
     fn update_usage(&self, cx: &mut Cx) {
         let u = &self.usage;
         let k = |n: u64| {
-            if n >= 1000 {
-                format!("{:.1}k", n as f64 / 1000.0)
+            if n == 0 {
+                "0".to_string()
             } else {
-                n.to_string()
+                format!("{:.1}k", n as f64 / 1000.0)
             }
         };
         let win = if u.ctx_window >= 1000 {
@@ -1562,7 +1800,7 @@ impl App {
             u.ctx_window.to_string()
         };
         let stats = format!(
-            "{} {} R{} ${:.3} {}/{}(auto)",
+            "↑{}    ↓{}    R{}    ${:.3}    {}/{}(auto)",
             k(u.input),
             k(u.output),
             k(u.cached),
@@ -1589,15 +1827,19 @@ impl App {
                 self.start_working(cx);
             }
             RhoEvent::MessageDelta { delta } => {
+                // Append to the streaming block but don't redraw per-delta; the
+                // NextFrame loop coalesces redraws to ~12/sec while busy.
                 append_streaming_response(&delta);
-                self.tail_and_redraw(cx);
+                self.stream_dirty = true;
             }
             RhoEvent::ReasoningDelta { delta } => {
+                finalize_streaming_response();
                 append_streaming_reasoning(&delta);
-                self.tail_and_redraw(cx);
+                self.stream_dirty = true;
             }
             RhoEvent::AgentEnd { reply, duration_ms } => {
                 finalize_reasoning(format_secs(duration_ms));
+                finalize_streaming_response();
                 // If nothing streamed, the final reply is our only text.
                 if !reply.is_empty() {
                     let mut blocks = CHAT_BLOCKS.write().unwrap();
@@ -1628,6 +1870,7 @@ impl App {
                 }
             }
             RhoEvent::ToolCall { name, arguments } => {
+                finalize_streaming_response();
                 CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
                     name,
                     args: arguments,
@@ -1720,17 +1963,29 @@ impl MatchEvent for App {
         }
 
         if ui.button(cx, ids!(btn_help)).clicked(actions) {
-            self.push_block(cx, ChatBlock::Info("Available commands: Session, Model, Resume, Providers, Abort, Help, Quit. Type a message and press Enter to chat.".into()));
-            return;
+            self.ui.modal(cx, ids!(help_modal)).open(cx);
+        }
+        if ui.button(cx, ids!(help_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(help_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(model_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(model_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(session_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(session_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(provider_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(provider_modal)).close(cx);
         }
 
+
         if ui.button(cx, ids!(btn_abort)).clicked(actions) {
-            let connected = self.agent.is_some();
-            if let Some(agent) = &mut self.agent {
-                let _ = agent.abort();
-            }
-            if !connected {
+            if !self.busy {
                 self.push_block(cx, ChatBlock::Info("nothing to abort.".into()));
+            } else if let Some(agent) = &mut self.agent {
+                let _ = agent.abort();
+                self.working_state = "aborting".into();
+                self.tick_working(cx);
             }
             return;
         }
@@ -1884,7 +2139,10 @@ impl MatchEvent for App {
                     .unwrap()
                     .push(ChatBlock::User(text.clone()));
                 let send = match &mut self.agent {
-                    Some(agent) => agent.prompt(&text),
+                    Some(agent) => {
+                        let steer = self.busy;
+                        agent.prompt(&text, steer)
+                    }
                     None => Err("rho agent not connected.".into()),
                 };
                 if let Err(e) = send {
@@ -1937,9 +2195,24 @@ impl AppMain for App {
         }
 
         // Animate the working-line spinner while an agent turn is in flight.
+        // Reschedule every frame, but only do (potentially expensive) redraw
+        // work at most every ~80ms so streaming can't starve the event loop.
         if self.busy && self.next_frame.is_event(event).is_some() {
-            self.tick_working(cx);
             self.next_frame = cx.new_next_frame();
+            let due = self
+                .last_tick
+                .map_or(true, |t| t.elapsed() >= std::time::Duration::from_millis(80));
+            if due {
+                self.last_tick = Some(Instant::now());
+                self.tick_working(cx);
+                if self.stream_dirty {
+                    // Redraw only — let the PortalList's auto_tail keep the
+                    // bottom in view. Calling set_first_id_and_scroll every
+                    // flush fights smooth_tail and causes warp-speed jitter.
+                    self.ui.redraw(cx);
+                    self.stream_dirty = false;
+                }
+            }
         }
     }
 }
