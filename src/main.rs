@@ -30,6 +30,8 @@ macro_rules! trace {
 enum ChatBlock {
     /// A user-submitted message.
     User(String),
+    /// A mid-turn steering message (sent while the agent was busy).
+    Steer(String),
     /// A completed reasoning ("thinking") block with elapsed time.
     Reasoning { text: String, elapsed_secs: String },
     /// A streaming reasoning block (still thinking).
@@ -45,6 +47,7 @@ enum ChatBlock {
         args: String,
         status: ToolStatus,
         output: Option<String>,
+        expanded: bool,
     },
     /// A tool-approval prompt from the agent (blocks until we respond).
     Approval {
@@ -587,6 +590,7 @@ fn finalize_tool_call(name: &str, status: ToolStatus, output: Option<String>) {
         args: String::new(),
         status,
         output,
+        expanded: false,
     });
 }
 
@@ -630,10 +634,15 @@ impl Widget for ChatScroll {
                                 w.label(cx, ids!(msg)).set_text(cx, text);
                                 w.draw_all_unscoped(cx);
                             }
+                            ChatBlock::Steer(text) => {
+                                let w = list.item(cx, item_id, id!(Steer));
+                                w.label(cx, ids!(msg)).set_text(cx, text);
+                                w.draw_all_unscoped(cx);
+                            }
                             ChatBlock::Reasoning { text, elapsed_secs } => {
                                 let w = list.item(cx, item_id, id!(Thought));
                                 w.label(cx, ids!(head))
-                                    .set_text(cx, &format!("? thought · {}", elapsed_secs));
+                                    .set_text(cx, &format!("? thought \u{00b7} {}", elapsed_secs));
                                 w.label(cx, ids!(body)).set_text(cx, &cap_head(text, 4000));
                                 w.draw_all_unscoped(cx);
                             }
@@ -658,12 +667,13 @@ impl Widget for ChatScroll {
                                 args,
                                 status,
                                 output,
+                                expanded,
                             } => {
                                 let (template, status_text) = match status {
-                                    ToolStatus::Success => (id!(ToolDone), "✓ done"),
-                                    ToolStatus::Pending => (id!(ToolRun), "⟳ running"),
-                                    ToolStatus::Error => (id!(ToolFail), "✗ failed"),
-                                    ToolStatus::Denied => (id!(ToolRun), "⊘ denied"),
+                                    ToolStatus::Success => (id!(ToolDone), "\u{2713} done"),
+                                    ToolStatus::Pending => (id!(ToolRun), "\u{27f3} running"),
+                                    ToolStatus::Error => (id!(ToolFail), "\u{2717} failed"),
+                                    ToolStatus::Denied => (id!(ToolRun), "\u{2298} denied"),
                                 };
                                 let w = list.item(cx, item_id, template);
                                 w.label(cx, ids!(head))
@@ -671,10 +681,23 @@ impl Widget for ChatScroll {
                                 match output {
                                     Some(out) => {
                                         w.widget(cx, ids!(out)).set_visible(cx, true);
-                                        w.label(cx, ids!(out)).set_text(cx, &cap_head(out, 4000));
+                                        let display = if *expanded {
+                                            out.clone()
+                                        } else {
+                                            cap_head(out, 10000)
+                                        };
+                                        w.label(cx, ids!(out)).set_text(cx, &display);
+                                        // Show expand/collapse button only when output is
+                                        // large enough to have been truncated.
+                                        let can_toggle = out.chars().count() > 10000;
+                                        w.widget(cx, ids!(expand_btn)).set_visible(cx, can_toggle);
+                                        if can_toggle {
+                                            w.button(cx, ids!(expand_btn)).set_text(cx, if *expanded { "Collapse" } else { "Expand" });
+                                        }
                                     }
                                     None => {
                                         w.widget(cx, ids!(out)).set_visible(cx, false);
+                                        w.widget(cx, ids!(expand_btn)).set_visible(cx, false);
                                     }
                                 }
                                 w.draw_all_unscoped(cx);
@@ -868,6 +891,17 @@ script_mod! {
             drag_scrolling: true
             padding: Inset{top: 8 right: 12 bottom: 8 left: 12}
 
+            Steer := SolidView {
+                width: Fill height: Fit
+                margin: Inset{bottom: 4}
+                padding: Inset{top: 8 right: 8 bottom: 8 left: 8}
+                draw_bg.color: #x3a2a00
+                msg := Label {
+                    width: Fill
+                    draw_text.color: #xeaeaea
+                    draw_text.text_style.font_size: 13
+                }
+            }
             User := SolidView {
                 width: Fill height: Fit
                 margin: Inset{bottom: 4}
@@ -932,6 +966,15 @@ script_mod! {
                 draw_bg.color: #x00551a
                 head := Label { width: Fill draw_text.color: #xeaeaea draw_text.text_style.font_size: 13 }
                 out := Label { width: Fill draw_text.color: #x9a9a9a draw_text.text_style.font_size: 12 }
+                expand_btn := Button {
+                    width: Fit height: Fit
+                    text: "Expand"
+                    draw_bg.color: #x2a2a30
+                    draw_bg.color_hover: #x3a3a40
+                    draw_bg.color_down: #x1a1a20
+                    draw_text.color: #xcacaca
+                    draw_text.text_style.font_size: 11
+                }
             }
 
             ToolRun := SolidView {
@@ -942,6 +985,15 @@ script_mod! {
                 draw_bg.color: #x2e2e2e
                 head := Label { width: Fill draw_text.color: #xeaeaea draw_text.text_style.font_size: 13 }
                 out := Label { width: Fill draw_text.color: #x9a9a9a draw_text.text_style.font_size: 12 }
+                expand_btn := Button {
+                    width: Fit height: Fit
+                    text: "Expand"
+                    draw_bg.color: #x2a2a30
+                    draw_bg.color_hover: #x3a3a40
+                    draw_bg.color_down: #x1a1a20
+                    draw_text.color: #xcacaca
+                    draw_text.text_style.font_size: 11
+                }
             }
 
             ToolFail := SolidView {
@@ -952,6 +1004,15 @@ script_mod! {
                 draw_bg.color: #x5f1a1a
                 head := Label { width: Fill draw_text.color: #xeaeaea draw_text.text_style.font_size: 13 }
                 out := Label { width: Fill draw_text.color: #x9a9a9a draw_text.text_style.font_size: 12 }
+                expand_btn := Button {
+                    width: Fit height: Fit
+                    text: "Expand"
+                    draw_bg.color: #x2a2a30
+                    draw_bg.color_hover: #x3a3a40
+                    draw_bg.color_down: #x1a1a20
+                    draw_text.color: #xcacaca
+                    draw_text.text_style.font_size: 11
+                }
             }
 
             Info := View {
@@ -1248,7 +1309,7 @@ script_mod! {
                         input_inner := TextInput{
                             width: Fill height: 80
                             padding: Inset{top: 8, right: 10, bottom: 8, left: 10}
-                            empty_text: "Type a message... (Enter to send, Ctrl-J for newline)"
+                            empty_text: "Type a message... (Enter to send, Shift+Enter for newline)"
                             draw_text.color: #xdcdcdc
                             draw_text.text_style.font_size: 13
                             draw_bg.color: #x0000
@@ -1411,7 +1472,7 @@ script_mod! {
                                 }
                                 Label{
                                     width: Fill
-                                    text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Reload — reload extensions from disk (picks up new .rho/extensions/*.ts)\n  Restart — kill and re-spawn the rho subprocess (use if it's stuck or unresponsive)\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Ctrl-J inserts a newline.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline."
+                                    text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Reload — reload extensions from disk (picks up new .rho/extensions/*.ts)\n  Restart — kill and re-spawn the rho subprocess (use if it's stuck or unresponsive)\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Shift+Enter inserts a newline.\n\nWhile the agent is working, the input placeholder changes to 'Steer the agent...' and your message is sent as a mid-turn steering prompt instead of starting a new turn. Steering messages appear with a distinct background and are reflected in the working line.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline.\n\nTool output longer than 10000 characters is truncated — click Expand to see the full output, Collapse to hide it again."
                                     draw_text.color: #xcacaca
                                     draw_text.text_style.font_size: 12
                                 }
@@ -1594,12 +1655,20 @@ impl App {
         CHAT_BLOCKS.write().unwrap().push(block);
         self.tail_and_redraw(cx);
     }
-
     fn set_busy(&mut self, cx: &mut Cx, busy: bool) {
         self.busy = busy;
+        // Swap the input placeholder to indicate steering mode while the agent
+        // is mid-turn.
+        let placeholder = if busy {
+            "Steer the agent... (Enter to send, Shift+Enter for newline)"
+        } else {
+            "Type a message... (Enter to send, Shift+Enter for newline)"
+        };
+        self.ui
+            .text_input(cx, ids!(input_inner))
+            .set_empty_text(cx, placeholder.to_string());
         self.ui.widget(cx, ids!(working)).set_visible(cx, busy);
     }
-
     /// Start an agent turn: show the working line and begin the spinner animation.
     fn start_working(&mut self, cx: &mut Cx) {
         trace!("[busy] -> true (agent/start)");
@@ -1947,6 +2016,7 @@ impl App {
                     args: arguments,
                     status: ToolStatus::Pending,
                     output: None,
+                    expanded: false,
                 });
                 self.tail_and_redraw(cx);
             }
@@ -2191,8 +2261,25 @@ impl MatchEvent for App {
             self.pending_resume_path = None;
         }
 
+        // ── Inline block actions: tool call expand/collapse ──
+        {
+            let list = self
+                .ui
+                .widget(cx, ids!(chat_scroll))
+                .portal_list(cx, ids!(list));
+            for (item_id, item) in list.items_with_actions(actions) {
+                if item.button(cx, ids!(expand_btn)).clicked(actions) {
+                    let mut blocks = CHAT_BLOCKS.write().unwrap();
+                    if let Some(ChatBlock::ToolCall { expanded, .. }) = blocks.get_mut(item_id) {
+                        *expanded = !*expanded;
+                    }
+                    drop(blocks);
+                    self.tail_and_redraw(cx);
+                }
+            }
+        }
+
         // ── Inline block actions: approval buttons ──
-        // Collect first, then act, so we don't mutate the portal list mid-iteration.
         let mut approvals: Vec<(usize, bool, Option<String>)> = Vec::new();
         {
             let list = self
@@ -2221,16 +2308,31 @@ impl MatchEvent for App {
         if let Some((text, _mods)) = input.returned(actions) {
             if !text.is_empty() {
                 input.set_text(cx, "");
+                let steer = self.busy;
+                let block = if steer {
+                    ChatBlock::Steer(text.clone())
+                } else {
+                    ChatBlock::User(text.clone())
+                };
                 CHAT_BLOCKS
                     .write()
                     .unwrap()
-                    .push(ChatBlock::User(text.clone()));
-                let send = match &mut self.agent {
-                    Some(agent) => {
-                        let steer = self.busy;
-                        agent.prompt(&text, steer)
+                    .push(block);
+                let send = if steer {
+                    // Acknowledge the steer and reflect it in the working line.
+                    self.working_state = "steered".into();
+                    self.tick_working(cx);
+                    self.ui.text_input(cx, ids!(input_inner))
+                        .set_empty_text(cx, "Steer the agent... (Enter to send, Shift+Enter for newline)".into());
+                    match &mut self.agent {
+                        Some(agent) => agent.prompt(&text, true),
+                        None => Err("rho agent not connected.".into()),
                     }
-                    None => Err("rho agent not connected.".into()),
+                } else {
+                    match &mut self.agent {
+                        Some(agent) => agent.prompt(&text, false),
+                        None => Err("rho agent not connected.".into()),
+                    }
                 };
                 if let Err(e) = send {
                     CHAT_BLOCKS
@@ -2911,6 +3013,7 @@ mod tests {
             args: "{\"path\":\"test.rs\"}".into(),
             status: ToolStatus::Pending,
             output: None,
+            expanded: false,
         });
         finalize_tool_call("read_file", ToolStatus::Success, Some("ok".into()));
         let blocks = CHAT_BLOCKS.read().unwrap();
@@ -2951,6 +3054,7 @@ mod tests {
             args: String::new(),
             status: ToolStatus::Success,
             output: Some("already done".into()),
+            expanded: false,
         });
         // Should NOT update the already-success block, should push fallback.
         finalize_tool_call("read_file", ToolStatus::Error, Some("different".into()));
