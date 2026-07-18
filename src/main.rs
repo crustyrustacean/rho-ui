@@ -542,6 +542,75 @@ fn cap_tail(s: &str, max: usize) -> String {
         format!("\u{2026} ({} earlier chars)\n{}", count - max, tail)
     }
 }
+
+/// Render a getSessionStats result as the aligned key/value text for the
+/// Stats modal (the GUI equivalent of the CLI's /stats).
+fn format_session_stats(r: &serde_json::Value) -> String {
+    let api = r.get("apiUsage");
+    let role = r.get("roleTokens");
+    let res = r.get("resolutionTokens");
+    let kfmt = |n: u64| {
+        if n >= 1000 {
+            format!("{:.1}k", n as f64 / 1000.0)
+        } else {
+            n.to_string()
+        }
+    };
+    format!(
+        "Context\n\
+         \x20 window          {}\n\
+         \x20 used            {} ({}%)\n\
+         \x20 remaining       {}\n\
+         \x20 completion rsv  {}\n\
+         \n\
+         Session\n\
+         \x20 messages        {}\n\
+         \x20 entries         {} ({} on path, {} compacted)\n\
+         \n\
+         Role tokens\n\
+         \x20 system          {}\n\
+         \x20 user            {}\n\
+         \x20 assistant       {}\n\
+         \x20 tool            {}\n\
+         \n\
+         Resolution\n\
+         \x20 full            {}\n\
+         \x20 outlined        {}\n\
+         \x20 summarized      {}\n\
+         \x20 pinned          {}\n\
+         \n\
+         API usage\n\
+         \x20 input           {}\n\
+         \x20 output          {}\n\
+         \x20 cached          {}\n\
+         \x20 total           {}\n\
+         \x20 requests        {}\n\
+         \x20 cost            ${:.4}",
+        kfmt(ju64(Some(r), "contextWindow")),
+        kfmt(ju64(Some(r), "estimatedUsed")),
+        ju64(Some(r), "utilizationPercent"),
+        kfmt(ju64(Some(r), "estimatedRemaining")),
+        kfmt(ju64(Some(r), "completionReserve")),
+        ju64(Some(r), "messageCount"),
+        ju64(Some(r), "entryCount"),
+        ju64(Some(r), "pathEntryCount"),
+        ju64(Some(r), "compactedEntryCount"),
+        kfmt(ju64(role, "system")),
+        kfmt(ju64(role, "user")),
+        kfmt(ju64(role, "assistant")),
+        kfmt(ju64(role, "tool")),
+        kfmt(ju64(res, "full")),
+        kfmt(ju64(res, "outlined")),
+        kfmt(ju64(res, "summarized")),
+        kfmt(ju64(res, "pinned")),
+        kfmt(ju64(api, "totalInputTokens")),
+        kfmt(ju64(api, "totalOutputTokens")),
+        kfmt(ju64(api, "totalCachedTokens")),
+        kfmt(ju64(api, "totalTokens")),
+        ju64(api, "requestCount"),
+        jf64(api, "totalCost"),
+    )
+}
 fn append_streaming_reasoning(delta: &str) {
     let mut blocks = CHAT_BLOCKS.write().unwrap();
     match blocks.last_mut() {
@@ -1263,6 +1332,14 @@ script_mod! {
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
+                        btn_stats := Button{
+                            text: "Stats"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                        }
                         btn_help := Button{
                             text: "Help"
                             draw_bg.color: #x2a2a30
@@ -1452,6 +1529,46 @@ script_mod! {
 
                     // ── Provider info modal (overlay; scrollable list) ──
 
+
+                    // ── Stats modal ──
+                    stats_modal := Modal{
+                        content +: {
+                            width: 460
+                            height: Fit
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fit
+                                padding: Inset{top: 14 right: 14 bottom: 14 left: 14}
+                                flow: Down spacing: 10
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "Session stats"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 14
+                                }
+                                stats_body := Label{
+                                    width: Fill
+                                    text: ""
+                                    draw_text.color: #xcacaca
+                                    draw_text.text_style: theme.font_code{font_size: 12}
+                                }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    stats_close := Button{
+                                        text: "Close"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // ── Help modal ──
                     help_modal := Modal{
                         content +: {
@@ -1610,6 +1727,8 @@ pub struct App {
     current_model: Option<String>,
     #[rust]
     resume_latest_requested: bool,
+    #[rust]
+    stats_requested: bool,
     #[rust]
     pending_resume_path: Option<String>,
     #[rust]
@@ -1876,6 +1995,15 @@ impl App {
                 self.usage.ctx_window = ju64(Some(&result), "contextWindow");
                 self.usage.util = ju64(Some(&result), "utilizationPercent").min(255) as u8;
                 self.update_usage(cx);
+                // Stats button flow: same response also feeds the modal when
+                // the user explicitly asked for it (mirrors resume_latest_requested).
+                if self.stats_requested {
+                    self.stats_requested = false;
+                    self.ui
+                        .label(cx, ids!(stats_body))
+                        .set_text(cx, &format_session_stats(&result));
+                    self.ui.modal(cx, ids!(stats_modal)).open(cx);
+                }
             }
             RequestKind::ReloadExtensions => {
                 let reloaded = ju64(Some(&result), "reloaded");
@@ -1934,20 +2062,24 @@ impl App {
                 format!("{:.1}k", n as f64 / 1000.0)
             }
         };
-        let win = if u.ctx_window >= 1000 {
-            format!("{:.0}k", u.ctx_window as f64 / 1000.0)
+        // Context portion: estimated tokens used over the prompt budget, plus
+        // the utilization percentage. The prompt budget is the window minus the
+        // completion reserve — the denominator utilization is computed against.
+        let stats = if u.ctx_window == 0 && u.ctx_used == 0 {
+            // Nothing reported yet — show cumulative API tokens only.
+            format!("\u{2191}{}    \u{2193}{}    R{}    ${:.3}", k(u.input), k(u.output), k(u.cached), u.cost)
         } else {
-            u.ctx_window.to_string()
+            format!(
+                "\u{2191}{}    \u{2193}{}    R{}    ${:.3}    ctx {}/{} ({}%)",
+                k(u.input),
+                k(u.output),
+                k(u.cached),
+                u.cost,
+                k(u.ctx_used),
+                k(u.ctx_window),
+                u.util,
+            )
         };
-        let stats = format!(
-            "↑{}    ↓{}    R{}    ${:.3}    {}/{}(auto)",
-            k(u.input),
-            k(u.output),
-            k(u.cached),
-            u.cost,
-            u.util,
-            win
-        );
         self.ui.label(cx, ids!(footer_stats)).set_text(cx, &stats);
     }
 
@@ -2101,6 +2233,20 @@ impl MatchEvent for App {
         if ui.button(cx, ids!(btn_quit)).clicked(actions) {
             cx.quit();
             return;
+        }
+
+        if ui.button(cx, ids!(btn_stats)).clicked(actions) {
+            match &mut self.agent {
+                Some(agent) => {
+                    self.stats_requested = true;
+                    let _ = agent.get_session_stats();
+                }
+                None => self.push_block(cx, ChatBlock::Info("not connected.".into())),
+            }
+            return;
+        }
+        if ui.button(cx, ids!(stats_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(stats_modal)).close(cx);
         }
 
         if ui.button(cx, ids!(btn_help)).clicked(actions) {
@@ -2906,13 +3052,23 @@ mod tests {
 
     // ── Streaming helpers (via CHAT_BLOCKS global) ────────────────────────────
 
-    fn reset_chat_blocks() {
+    /// Serializes tests that touch the global CHAT_BLOCKS — cargo runs tests in
+    /// parallel, so unsynchronized clears race other tests' asserts (flaky
+    /// failures). Hold the returned guard for the whole test.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use]
+    fn reset_chat_blocks() -> std::sync::MutexGuard<'static, ()> {
+        // A panicking test poisons the mutex; the data it guards is re-cleared
+        // here anyway, so poisoning is safe to ignore.
+        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         CHAT_BLOCKS.write().unwrap().clear();
+        guard
     }
 
     #[test]
     fn append_streaming_response_creates_new_block() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         append_streaming_response("hello");
         let blocks = CHAT_BLOCKS.read().unwrap();
         assert_eq!(blocks.len(), 1);
@@ -2924,7 +3080,7 @@ mod tests {
 
     #[test]
     fn append_streaming_response_appends_to_existing() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         append_streaming_response("hello");
         append_streaming_response(" world");
         let blocks = CHAT_BLOCKS.read().unwrap();
@@ -2937,7 +3093,7 @@ mod tests {
 
     #[test]
     fn append_streaming_response_creates_new_block_after_finalize() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         append_streaming_response("first");
         finalize_streaming_response();
         append_streaming_response("second");
@@ -2949,14 +3105,14 @@ mod tests {
 
     #[test]
     fn finalize_streaming_response_noop_on_empty() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         finalize_streaming_response();
         assert!(CHAT_BLOCKS.read().unwrap().is_empty());
     }
 
     #[test]
     fn finalize_streaming_response_noop_on_non_streaming() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         CHAT_BLOCKS.write().unwrap().push(ChatBlock::Info("test".into()));
         finalize_streaming_response();
         let blocks = CHAT_BLOCKS.read().unwrap();
@@ -2966,7 +3122,7 @@ mod tests {
 
     #[test]
     fn append_streaming_reasoning_creates_new_block() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         append_streaming_reasoning("thinking...");
         let blocks = CHAT_BLOCKS.read().unwrap();
         assert_eq!(blocks.len(), 1);
@@ -2978,7 +3134,7 @@ mod tests {
 
     #[test]
     fn append_streaming_reasoning_appends_to_existing() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         append_streaming_reasoning("thinking");
         append_streaming_reasoning(" more");
         let blocks = CHAT_BLOCKS.read().unwrap();
@@ -2990,7 +3146,7 @@ mod tests {
 
     #[test]
     fn finalize_reasoning_converts_to_finalized() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         append_streaming_reasoning("deep thoughts");
         finalize_reasoning("5.2s".into());
         let blocks = CHAT_BLOCKS.read().unwrap();
@@ -3007,7 +3163,7 @@ mod tests {
 
     #[test]
     fn finalize_tool_call_updates_pending() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
             name: "read_file".into(),
             args: "{\"path\":\"test.rs\"}".into(),
@@ -3030,7 +3186,7 @@ mod tests {
 
     #[test]
     fn finalize_tool_call_fallback_pushes_new_block() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         // No matching pending tool call — should push a fallback block.
         finalize_tool_call("unknown_tool", ToolStatus::Error, Some("failed".into()));
         let blocks = CHAT_BLOCKS.read().unwrap();
@@ -3048,7 +3204,7 @@ mod tests {
 
     #[test]
     fn finalize_tool_call_skips_non_pending() {
-        reset_chat_blocks();
+        let _guard = reset_chat_blocks();
         CHAT_BLOCKS.write().unwrap().push(ChatBlock::ToolCall {
             name: "read_file".into(),
             args: String::new(),
