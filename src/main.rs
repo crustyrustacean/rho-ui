@@ -1921,10 +1921,18 @@ impl App {
                 self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
                 self.sync_model_list(cx);
                 self.push_block(cx, ChatBlock::Info(format!("\u{2192} model: {}", model)));
-                // The context window (and usage stats) change with the model —
-                // re-fetch so the footer reflects the new model immediately,
-                // rather than waiting for the next agent turn's `usage` event.
-                if let Some(agent) = &mut self.agent {
+                // Refresh the footer's context window for the new model. Newer
+                // rho bundles the post-switch context stats into this response
+                // (contextWindow/estimatedUsed/utilizationPercent) — use them
+                // directly so the footer updates in the same redraw as the model
+                // name, with no extra round-trip. Fall back to getSessionStats
+                // for older rho that doesn't send them.
+                if result.get("contextWindow").is_some() {
+                    self.usage.ctx_window = ju64(Some(&result), "contextWindow");
+                    self.usage.ctx_used = ju64(Some(&result), "estimatedUsed");
+                    self.usage.util = ju64(Some(&result), "utilizationPercent").min(255) as u8;
+                    self.update_usage(cx);
+                } else if let Some(agent) = &mut self.agent {
                     let _ = agent.get_session_stats();
                 }
             }
