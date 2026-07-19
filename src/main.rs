@@ -1921,6 +1921,12 @@ impl App {
                 self.ui.label(cx, ids!(footer_model)).set_text(cx, &model);
                 self.sync_model_list(cx);
                 self.push_block(cx, ChatBlock::Info(format!("\u{2192} model: {}", model)));
+                // The context window (and usage stats) change with the model —
+                // re-fetch so the footer reflects the new model immediately,
+                // rather than waiting for the next agent turn's `usage` event.
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.get_session_stats();
+                }
             }
             RequestKind::ListProviders => {
                 let mut providers: Vec<(String, bool, bool, bool)> = Vec::new();
