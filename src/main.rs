@@ -78,8 +78,8 @@ enum ApprovalResolution {
 
 static CHAT_BLOCKS: RwLock<Vec<ChatBlock>> = RwLock::new(Vec::new());
 
-/// Models shown in the picker modal: (name, is_current).
-static MODELS: RwLock<Vec<(String, bool)>> = RwLock::new(Vec::new());
+/// Models shown in the picker modal: (id, provider, is_current).
+static MODELS: RwLock<Vec<(String, String, bool)>> = RwLock::new(Vec::new());
 
 /// Sessions shown in the picker modal: (path, mtime_secs, entry_count).
 static SESSIONS: RwLock<Vec<(String, u64, u64)>> = RwLock::new(Vec::new());
@@ -836,12 +836,15 @@ impl Widget for ModelList {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 list.set_item_range(cx, 0, models.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
-                    if let Some((name, is_current)) = models.get(item_id) {
+                    if let Some((id, provider, is_current)) = models.get(item_id) {
                         let w = list.item(cx, item_id, id!(row));
+                        // Prefix with the provider so models from different
+                        // providers (e.g. openrouter vs zai) are clearly
+                        // differentiated; the list is already sorted by provider.
                         let label = if *is_current {
-                            format!("\u{2713} {}", name)
+                            format!("\u{2713} {} \u{00b7} {}", provider, id)
                         } else {
-                            name.clone()
+                            format!("{} \u{00b7} {}", provider, id)
                         };
                         w.button(cx, ids!(pick)).set_text(cx, &label);
                         w.draw_all_unscoped(cx);
@@ -1718,9 +1721,9 @@ pub struct App {
     #[rust]
     usage: UsageState,
     #[rust]
-    models: Vec<String>,
+    models: Vec<(String, String)>,
     #[rust]
-    filtered_models: Vec<String>,
+    filtered_models: Vec<(String, String)>,
     #[rust]
     model_filter_text: String,
     #[rust]
@@ -1856,8 +1859,8 @@ impl App {
         {
             let mut models = MODELS.write().unwrap();
             models.clear();
-            for m in &self.filtered_models {
-                models.push((m.clone(), Some(m.as_str()) == current));
+            for (id, provider) in &self.filtered_models {
+                models.push((id.clone(), provider.clone(), Some(id.as_str()) == current));
             }
         }
         self.ui.redraw(cx);
@@ -1872,7 +1875,9 @@ impl App {
         } else {
             self.models
                 .iter()
-                .filter(|m| m.to_lowercase().contains(&f))
+                .filter(|(id, provider)| {
+                    id.to_lowercase().contains(&f) || provider.to_lowercase().contains(&f)
+                })
                 .cloned()
                 .collect()
         };
@@ -1891,15 +1896,23 @@ impl App {
                 self.sync_model_list(cx);
             }
             RequestKind::ListModels => {
-                self.models = result
+                let mut models: Vec<(String, String)> = result
                     .get("models")
                     .and_then(|m| m.as_array())
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|e| e.get("id").and_then(|x| x.as_str()).map(String::from))
+                            .filter_map(|e| {
+                                let id = e.get("id")?.as_str()?.to_owned();
+                                let provider = jstr(Some(e), "provider");
+                                Some((id, provider))
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
+                // Cluster by provider, then id, so the list reads in groups
+                // (e.g. all `openrouter` together, then all `zai`).
+                models.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+                self.models = models;
                 self.recompute_filtered_models(cx);
             }
             RequestKind::SetModel => {
@@ -2349,8 +2362,8 @@ impl MatchEvent for App {
                 .portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
                 if item.button(cx, ids!(pick)).clicked(actions) {
-                    if let Some((name, _)) = MODELS.read().unwrap().get(item_id) {
-                        picked = Some(name.clone());
+                    if let Some((id, _, _)) = MODELS.read().unwrap().get(item_id) {
+                        picked = Some(id.clone());
                     }
                 }
             }
