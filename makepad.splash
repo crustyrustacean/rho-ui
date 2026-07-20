@@ -1,0 +1,41 @@
+use mod.hub
+
+hub.set_run_items([
+    {
+        name: "rho-ui"
+        in_studio: false
+        on_run: |build_id| {
+            let name = self.name
+            hub.run(
+                {
+                    "STUDIO_HOST": hub.studio_ip
+                    "STUDIO_BUILD": build_id.to_string()
+                    "STUDIO_CRATE": name
+                },
+                "cargo",
+                ["run", "-p", name],
+            )
+        }
+    },
+    {
+        name: "Check"
+        in_studio: false
+        on_run: |build_id| {
+            hub.run(nil, "cargo", ["check", "-p", "rho-ui"])
+        }
+    },
+    {
+        name: "Test"
+        in_studio: false
+        on_run: |build_id| {
+            hub.run(nil, "cargo", ["test", "-p", "rho-ui"])
+        }
+    },
+    {
+        name: "Clippy"
+        in_studio: false
+        on_run: |build_id| {
+            hub.run(nil, "cargo", ["clippy", "-p", "rho-ui"])
+        }
+    },
+])

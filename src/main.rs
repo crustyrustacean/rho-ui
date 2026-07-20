@@ -1266,7 +1266,7 @@ script_mod! {
                             }
                         }
                         subtitle_label := Label{
-                            text: "Rust pair programmer"
+                            text: "Rust programming assistant"
                             draw_text.color: #x6a6a6a
                             draw_text.text_style.font_size: 12
                         }
