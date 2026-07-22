@@ -376,6 +376,14 @@ script_mod! {
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
+                        btn_extensions := Button{
+                            text: "Extensions"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                        }
                         btn_reload := Button{
                             text: "Reload"
                             draw_bg.color: #x2a2a30
@@ -710,6 +718,50 @@ script_mod! {
                                     width: Fill height: Fit
                                     flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
                                     provider_close := Button{
+                                        text: "Close"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // ── Extensions modal ──
+                    extensions_modal := Modal{
+                        content +: {
+                            width: 500
+                            height: 520
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fill
+                                padding: Inset{top: 14 right: 14 bottom: 14 left: 14}
+                                flow: Down spacing: 10
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "Extensions"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 14
+                                }
+                                ScrollYView{
+                                    width: Fill height: Fill
+                                    padding: Inset{right: 10}
+                                    extensions_body := Label{
+                                        width: Fill
+                                        height: Fit
+                                        text: ""
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style: theme.font_code{font_size: 12}
+                                    }
+                                }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    extensions_close := Button{
                                         text: "Close"
                                         draw_bg.color: #x2a2a30
                                         draw_bg.color_hover: #x3a3a40

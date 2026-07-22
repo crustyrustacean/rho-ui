@@ -215,6 +215,13 @@ impl RhoAgent {
             serde_json::json!({}),
         )
     }
+    pub fn list_extensions(&mut self) -> Result<(), String> {
+        self.request(
+            RequestKind::ListExtensions,
+            "listExtensions",
+            serde_json::json!({}),
+        )
+    }
     pub fn approval_response(
         &mut self,
         approved: bool,

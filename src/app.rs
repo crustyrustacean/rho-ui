@@ -47,6 +47,8 @@ pub struct App {
     #[rust]
     stream_dirty: bool,
     #[rust]
+    steer_count: u32,
+    #[rust]
     last_tick: Option<Instant>,
 }
 
@@ -109,6 +111,7 @@ impl App {
     fn stop_working(&mut self, cx: &mut Cx) {
         trace!("[busy] -> false");
         self.working_start = None;
+        self.steer_count = 0;
         self.set_busy(cx, false);
     }
 
@@ -138,7 +141,6 @@ impl App {
         }
     }
 
-    /// Refresh the working-line label: cycling braille spinner + elapsed + state.
     fn tick_working(&self, cx: &mut Cx) {
         if let Some(start) = self.working_start {
             const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -149,9 +151,16 @@ impl App {
             } else {
                 &self.working_state
             };
+            // Steering badge: show a count next to the spinner when
+            // mid-turn steers have been queued.
+            let badge = if self.steer_count > 0 {
+                format!("  \u{2197} {} steered", self.steer_count)
+            } else {
+                String::new()
+            };
             self.ui.label(cx, ids!(working_text)).set_text(
                 cx,
-                &format!("{} Working  {:.1}s  {}", ch, elapsed.as_secs_f64(), state),
+                &format!("{} Working  {:.1}s  {}{}", ch, elapsed.as_secs_f64(), state, badge),
             );
         }
     }
@@ -343,6 +352,45 @@ impl App {
                         added, reloaded, removed
                     )),
                 );
+            }
+            RequestKind::ListExtensions => {
+                // Render the extensions list as a formatted string in a
+                // scrollable modal. rho returns an `extensions` array with
+                // at least a `name` field per entry; we show name + status.
+                let body = if let Some(arr) = result.get("extensions").and_then(|x| x.as_array()) {
+                    if arr.is_empty() {
+                        "No extensions installed.".to_string()
+                    } else {
+                        arr.iter()
+                            .map(|e| {
+                                let name = jstr(Some(e), "name");
+                                let status = jstr(Some(e), "status");
+                                let tools = ju64(Some(e), "toolCount");
+                                if status.is_empty() {
+                                    if tools > 0 {
+                                        format!("  {} ({} tools)", name, tools)
+                                    } else {
+                                        format!("  {}", name)
+                                    }
+                                } else {
+                                    if tools > 0 {
+                                        format!("  {} \u{2014} {} ({} tools)", name, status, tools)
+                                    } else {
+                                        format!("  {} \u{2014} {}", name, status)
+                                    }
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                } else {
+                    // Unknown shape — dump the raw JSON so nothing is hidden.
+                    serde_json::to_string_pretty(&result).unwrap_or_default()
+                };
+                self.ui
+                    .label(cx, ids!(extensions_body))
+                    .set_text(cx, &body);
+                self.ui.modal(cx, ids!(extensions_modal)).open(cx);
             }
         }
     }
@@ -566,6 +614,17 @@ impl App {
         if ui.button(cx, ids!(provider_close)).clicked(actions) {
             self.ui.modal(cx, ids!(provider_modal)).close(cx);
         }
+        if ui.button(cx, ids!(extensions_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(extensions_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(btn_providers)).clicked(actions) {
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.list_providers();
+            } else {
+                self.push_block(cx, ChatBlock::Info("not connected.".into()));
+            }
+            return true;
+        }
         if ui.button(cx, ids!(btn_reload)).clicked(actions) {
             if let Some(agent) = &mut self.agent {
                 let result = agent.reload_extensions();
@@ -608,9 +667,9 @@ impl App {
             }
             return true;
         }
-        if ui.button(cx, ids!(btn_providers)).clicked(actions) {
+        if ui.button(cx, ids!(btn_extensions)).clicked(actions) {
             if let Some(agent) = &mut self.agent {
-                let _ = agent.list_providers();
+                let _ = agent.list_extensions();
             } else {
                 self.push_block(cx, ChatBlock::Info("not connected.".into()));
             }
@@ -742,7 +801,7 @@ impl App {
                 };
                 chat_store::push(block);
                 let send = if steer {
-                    // Acknowledge the steer and reflect it in the working line.
+                    self.steer_count += 1;
                     self.working_state = "steered".into();
                     self.tick_working(cx);
                     self.ui.text_input(cx, ids!(input_inner))

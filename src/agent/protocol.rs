@@ -11,6 +11,7 @@ pub(crate) enum RequestKind {
     SetModel,
     ResumeSession,
     ReloadExtensions,
+    ListExtensions,
 }
 
 #[derive(Clone, Debug)]
