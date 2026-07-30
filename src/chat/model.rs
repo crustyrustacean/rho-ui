@@ -10,8 +10,8 @@ pub(crate) enum ChatBlock {
     ReasoningStreaming { text: String },
     /// A streaming response rendered as a cheap label until finalized.
     ResponseStreaming(String),
-    /// A finalized response rendered as markdown.
-    Response(String),
+    /// A finalized response rendered as markdown (collapsible).
+    Response { text: String, expanded: bool },
     /// A tool call block with status.
     ToolCall {
         name: String,

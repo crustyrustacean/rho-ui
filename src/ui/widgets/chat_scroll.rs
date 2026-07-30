@@ -47,9 +47,20 @@ impl Widget for ChatScroll {
                                 w.label(cx, ids!(msg)).set_text(cx, &cap_tail(text, 4000));
                                 w.draw_all_unscoped(cx);
                             }
-                            ChatBlock::Response(text) => {
+                            ChatBlock::Response { text, expanded } => {
                                 let w = list.item(cx, item_id, id!(Response));
-                                w.markdown(cx, ids!(msg)).set_text(cx, &cap_head(text, 4000));
+                                let display = if *expanded {
+                                    text.clone()
+                                } else {
+                                    cap_head(text, 4000)
+                                };
+                                w.markdown(cx, ids!(msg)).set_text(cx, &display);
+                                // Show expand/collapse when text is long enough to have been truncated.
+                                let can_toggle = text.chars().count() > 4000;
+                                w.widget(cx, ids!(expand_btn)).set_visible(cx, can_toggle);
+                                if can_toggle {
+                                    w.button(cx, ids!(expand_btn)).set_text(cx, if *expanded { "Collapse" } else { "Expand" });
+                                }
                                 w.draw_all_unscoped(cx);
                             }
                             ChatBlock::ToolCall {

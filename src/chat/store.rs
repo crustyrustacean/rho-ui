@@ -32,7 +32,7 @@ pub(crate) fn finalize_streaming_response() {
     let mut blocks = CHAT_BLOCKS.write().unwrap();
     if let Some(ChatBlock::ResponseStreaming(text)) = blocks.last_mut() {
         let owned = std::mem::take(text);
-        *blocks.last_mut().unwrap() = ChatBlock::Response(owned);
+        *blocks.last_mut().unwrap() = ChatBlock::Response { text: owned, expanded: false };
     }
 }
 
@@ -62,8 +62,8 @@ pub(crate) fn push_final_response_if_missing(reply: String) {
         return;
     }
     let mut blocks = CHAT_BLOCKS.write().unwrap();
-    if !matches!(blocks.last(), Some(ChatBlock::Response(_))) {
-        blocks.push(ChatBlock::Response(reply));
+    if !matches!(blocks.last(), Some(ChatBlock::Response { .. })) {
+        blocks.push(ChatBlock::Response { text: reply, expanded: false });
     }
 }
 
@@ -122,11 +122,14 @@ pub(crate) fn resolve_approval(index: usize, resolution: ApprovalResolution) {
     }
 }
 
-pub(crate) fn toggle_tool_output(index: usize) {
-    if let Some(ChatBlock::ToolCall { expanded, .. }) =
-        CHAT_BLOCKS.write().unwrap().get_mut(index)
-    {
-        *expanded = !*expanded;
+pub(crate) fn toggle_expand(index: usize) {
+    let mut blocks = CHAT_BLOCKS.write().unwrap();
+    if let Some(block) = blocks.get_mut(index) {
+        match block {
+            ChatBlock::ToolCall { expanded, .. } => *expanded = !*expanded,
+            ChatBlock::Response { expanded, .. } => *expanded = !*expanded,
+            _ => {}
+        }
     }
 }
 
@@ -149,7 +152,7 @@ mod tests {
         append_streaming_response("hello");
         append_streaming_response(" world");
         finalize_streaming_response();
-        assert!(matches!(&snapshot()[0], ChatBlock::Response(text) if text == "hello world"));
+        assert!(matches!(&snapshot()[0], ChatBlock::Response { text, .. } if text == "hello world"));
     }
 
     #[test]
@@ -180,7 +183,7 @@ mod tests {
     fn tool_and_approval_mutations_use_indices() {
         let _guard = reset();
         push_pending_tool_call("read_file".into(), "{}".into());
-        toggle_tool_output(0);
+        toggle_expand(0);
         push_approval("run_command".into(), "cargo test".into(), "write".into());
         resolve_approval(1, ApprovalResolution::Approved);
         let blocks = snapshot();

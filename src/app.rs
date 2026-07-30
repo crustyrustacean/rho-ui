@@ -747,9 +747,9 @@ impl App {
         }
     }
 
-    /// Inline chat-block actions: tool expand/collapse + approval buttons.
+    /// Inline chat-block actions: expand/collapse + approval buttons.
     fn handle_chat_block_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        // ── Tool call expand/collapse ──
+        // ── Expand/collapse (tool calls + responses) ──
         {
             let list = self
                 .ui
@@ -757,7 +757,7 @@ impl App {
                 .portal_list(cx, ids!(list));
             for (item_id, item) in list.items_with_actions(actions) {
                 if item.button(cx, ids!(expand_btn)).clicked(actions) {
-                    chat_store::toggle_tool_output(item_id);
+                    chat_store::toggle_expand(item_id);
                     self.tail_and_redraw(cx);
                 }
             }

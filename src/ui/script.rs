@@ -69,6 +69,7 @@ script_mod! {
 
             Response := View {
                 width: Fill height: Fit
+                flow: Down spacing: 4
                 margin: Inset{bottom: 8}
                 msg := Markdown {
                     width: Fill
@@ -82,6 +83,15 @@ script_mod! {
                     text_style_bold_italic: theme.font_bold_italic{font_size: 13}
                     text_style_fixed: theme.font_code{font_size: 13}
                     draw_text.color: #xdcdcdc
+                }
+                expand_btn := Button {
+                    width: Fit height: Fit
+                    text: "Expand"
+                    draw_bg.color: #x2a2a30
+                    draw_bg.color_hover: #x3a3a40
+                    draw_bg.color_down: #x1a1a20
+                    draw_text.color: #xcacaca
+                    draw_text.text_style.font_size: 11
                 }
             }
 
