@@ -675,6 +675,15 @@ impl App {
         if ui.button(cx, ids!(model_close)).clicked(actions) {
             self.ui.modal(cx, ids!(model_modal)).close(cx);
         }
+        if ui.button(cx, ids!(session_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(session_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(provider_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(provider_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(extensions_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(extensions_modal)).close(cx);
+        }
         if ui.button(cx, ids!(context_close)).clicked(actions) {
             self.ui.modal(cx, ids!(context_modal)).close(cx);
         }
