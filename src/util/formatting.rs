@@ -84,6 +84,7 @@ pub(crate) fn format_session_stats(result: &Value) -> String {
          \x20 outlined        {}\n\
          \x20 summarized      {}\n\
          \x20 pinned          {}\n\
+         \x20 compacted       {}\n\
          \n\
          API usage\n\
          \x20 input           {}\n\
@@ -109,6 +110,7 @@ pub(crate) fn format_session_stats(result: &Value) -> String {
         compact(ju64(resolution, "outlined")),
         compact(ju64(resolution, "summarized")),
         compact(ju64(resolution, "pinned")),
+        ju64(Some(result), "compactedEntryCount"),
         compact(ju64(api, "totalInputTokens")),
         compact(ju64(api, "totalOutputTokens")),
         compact(ju64(api, "totalCachedTokens")),
@@ -285,5 +287,6 @@ mod tests {
         assert!(formatted.contains("window          200.0k"));
         assert!(formatted.contains("messages        3"));
         assert!(formatted.contains("cost            $0.1250"));
+        assert!(formatted.contains("compacted       1"));
     }
 }
