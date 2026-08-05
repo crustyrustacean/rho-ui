@@ -618,22 +618,48 @@ impl App {
             return true;
         }
         if ui.button(cx, ids!(btn_stats)).clicked(actions) {
-            match &mut self.agent {
-                Some(agent) => {
-                    self.stats_requested = true;
-                    let _ = agent.get_session_stats();
+            // When a turn is running, render from cached usage data so the
+            // modal opens instantly instead of queuing behind the agent loop.
+            if self.busy {
+                let u = &self.usage;
+                self.ui
+                    .label(cx, ids!(stats_body))
+                    .set_text(cx, &format_usage_stats(
+                        u.input, u.output, u.cached, u.cost,
+                        u.ctx_used, u.ctx_window, u.util,
+                    ));
+                self.ui.modal(cx, ids!(stats_modal)).open(cx);
+            } else {
+                match &mut self.agent {
+                    Some(agent) => {
+                        self.stats_requested = true;
+                        let _ = agent.get_session_stats();
+                    }
+                    None => self.push_block(cx, ChatBlock::Info("not connected.".into())),
                 }
-                None => self.push_block(cx, ChatBlock::Info("not connected.".into())),
             }
             return true;
         }
         if ui.button(cx, ids!(btn_context)).clicked(actions) {
-            match &mut self.agent {
-                Some(agent) => {
-                    self.context_modal_requested = true;
-                    let _ = agent.get_session_stats();
+            // Same cached-render optimization as btn_stats: when busy, render
+            // instantly from self.usage to avoid queueing behind the turn.
+            if self.busy {
+                let u = &self.usage;
+                self.ui
+                    .label(cx, ids!(context_body))
+                    .set_text(cx, &format_usage_stats(
+                        u.input, u.output, u.cached, u.cost,
+                        u.ctx_used, u.ctx_window, u.util,
+                    ));
+                self.ui.modal(cx, ids!(context_modal)).open(cx);
+            } else {
+                match &mut self.agent {
+                    Some(agent) => {
+                        self.context_modal_requested = true;
+                        let _ = agent.get_session_stats();
+                    }
+                    None => self.push_block(cx, ChatBlock::Info("not connected.".into())),
                 }
-                None => self.push_block(cx, ChatBlock::Info("not connected.".into())),
             }
             return true;
         }
@@ -648,15 +674,6 @@ impl App {
         }
         if ui.button(cx, ids!(model_close)).clicked(actions) {
             self.ui.modal(cx, ids!(model_modal)).close(cx);
-        }
-        if ui.button(cx, ids!(session_close)).clicked(actions) {
-            self.ui.modal(cx, ids!(session_modal)).close(cx);
-        }
-        if ui.button(cx, ids!(provider_close)).clicked(actions) {
-            self.ui.modal(cx, ids!(provider_modal)).close(cx);
-        }
-        if ui.button(cx, ids!(extensions_close)).clicked(actions) {
-            self.ui.modal(cx, ids!(extensions_modal)).close(cx);
         }
         if ui.button(cx, ids!(context_close)).clicked(actions) {
             self.ui.modal(cx, ids!(context_modal)).close(cx);

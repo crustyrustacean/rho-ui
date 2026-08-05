@@ -120,6 +120,54 @@ pub(crate) fn format_session_stats(result: &Value) -> String {
     )
 }
 
+/// Render cached UsageState as aligned text for the Stats/Context modal.
+///
+/// Used when a turn is running and a fresh getSessionStats round-trip would
+/// queue behind the agent loop. Covers the context + API usage sections that
+/// UsageState tracks; omits role/resolution/session breakdown (not available
+/// from the Usage notification).
+pub(crate) fn format_usage_stats(
+    input: u64,
+    output: u64,
+    cached: u64,
+    cost: f64,
+    ctx_used: u64,
+    ctx_window: u64,
+    util: u8,
+) -> String {
+    let k = |n: u64| {
+        if n == 0 {
+            "0".to_string()
+        } else {
+            format!("{:.1}k", n as f64 / 1000.0)
+        }
+    };
+    let remaining = ctx_window.saturating_sub(ctx_used);
+    format!(
+        "Context\n\
+         \x20 window          {}\n\
+         \x20 used            {} ({}%)\n\
+         \x20 remaining       {}\n\
+         \n\
+         API usage (cumulative)\n\
+         \x20 input           {}\n\
+         \x20 output          {}\n\
+         \x20 cached          {}\n\
+         \x20 cost            ${:.4}\n\
+         \n\
+         Full breakdown available when idle."
+,
+        k(ctx_window),
+        k(ctx_used),
+        util,
+        k(remaining),
+        k(input),
+        k(output),
+        k(cached),
+        cost,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
