@@ -11,6 +11,10 @@ pub(crate) fn len() -> usize {
     CHAT_BLOCKS.read().unwrap().len()
 }
 
+pub(crate) fn clear() {
+    CHAT_BLOCKS.write().unwrap().clear();
+}
+
 pub(crate) fn push(block: ChatBlock) {
     CHAT_BLOCKS.write().unwrap().push(block);
 }

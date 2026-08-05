@@ -402,6 +402,14 @@ script_mod! {
                             draw_text.color: #xcacaca
                             draw_text.text_style.font_size: 12
                         }
+                        btn_context := Button{
+                            text: "Context"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                        }
                         btn_restart := Button{
                             text: "Restart"
                             draw_bg.color: #x2a2a30
@@ -683,7 +691,8 @@ script_mod! {
                                     Label{
                                         width: Fill
                                         height: Fit
-                                        text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Reload — reload extensions from disk (picks up new .rho/extensions/*.ts)\n  Restart — kill and re-spawn the rho subprocess (use if it's stuck or unresponsive)\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Shift+Enter inserts a newline.\n\nWhile the agent is working, the input placeholder changes to 'Steer the agent...' and your message is sent as a mid-turn steering prompt instead of starting a new turn. Steering messages appear with a distinct background and are reflected in the working line.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline.\n\nTool output longer than 10000 characters is truncated — click Expand to see the full output, Collapse to hide it again."
+                                        text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Reload — reload extensions from disk (picks up new .rho/extensions/*.ts)\n  Context — compact, clear, or start a new session, with live stats
+  Restart — kill and re-spawn the rho subprocess (use if it's stuck or unresponsive)\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Shift+Enter inserts a newline.\n\nWhile the agent is working, the input placeholder changes to 'Steer the agent...' and your message is sent as a mid-turn steering prompt instead of starting a new turn. Steering messages appear with a distinct background and are reflected in the working line.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline.\n\nTool output longer than 10000 characters is truncated — click Expand to see the full output, Collapse to hide it again."
                                         draw_text.color: #xcacaca
                                         draw_text.text_style.font_size: 12
                                     }
@@ -830,6 +839,75 @@ script_mod! {
                                         draw_bg.color_hover: #x2a6a3a
                                         draw_bg.color_down: #x0a3a1a
                                         draw_text.color: #xeaeaea
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // ── Context management modal ──
+                    context_modal := Modal{
+                        content +: {
+                            width: 500
+                            height: 520
+                            flow: Down
+
+                            SolidView{
+                                width: Fill height: Fill
+                                padding: Inset{top: 14 right: 14 bottom: 14 left: 14}
+                                flow: Down spacing: 10
+                                draw_bg.color: #x1b1b20
+
+                                Label{
+                                    text: "Context management"
+                                    draw_text.color: #xeaeaea
+                                    draw_text.text_style.font_size: 14
+                                }
+                                ScrollYView{
+                                    width: Fill height: Fill
+                                    padding: Inset{right: 10}
+                                    context_body := Label{
+                                        width: Fill
+                                        height: Fit
+                                        text: ""
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style: theme.font_code{font_size: 12}
+                                    }
+                                }
+                                View{
+                                    width: Fill height: Fit
+                                    flow: Right spacing: 8 align: Align{x: 0.0 y: 0.5}
+                                    context_compact := Button{
+                                        text: "Compact"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                    context_clear := Button{
+                                        text: "Clear"
+                                        draw_bg.color: #x5f3a00
+                                        draw_bg.color_hover: #x7f5000
+                                        draw_bg.color_down: #x4a2a00
+                                        draw_text.color: #xeaeaea
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                    context_new_session := Button{
+                                        text: "New Session"
+                                        draw_bg.color: #x1a4a2a
+                                        draw_bg.color_hover: #x2a6a3a
+                                        draw_bg.color_down: #x0a3a1a
+                                        draw_text.color: #xeaeaea
+                                        draw_text.text_style.font_size: 12
+                                    }
+                                    View{ width: Fill height: 1 }
+                                    context_close := Button{
+                                        text: "Close"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
                                         draw_text.text_style.font_size: 12
                                     }
                                 }
