@@ -32,20 +32,43 @@ These same tasks are wired into `makepad.splash` (the Studio hub): `rho-ui`,
 ## Project structure
 ```
 src/
-  main.rs      # the whole app (~2,900 lines) — being modularized
-  util/        # Phase 1: json + formatting helpers (+ co-located tests)
-makepad.splash # Studio build/run hub
-resources/     # app icon
-.rho/          # rho project config + memory (see "rho project memory")
+  main.rs           # entry point only: module decls, trace! macro, app_main!(App)
+  app.rs            # App struct, event handling, rho-event dispatch, spinner, usage
+  agent/
+    mod.rs          #   re-exports RhoAgent, RhoEvent, RequestKind
+    process.rs      #   RhoAgent: subprocess spawn, mpsc drain, JSON-RPC write + RPC wrappers
+    protocol.rs     #   RhoEvent enum, RequestKind, parse_notification + tests
+  chat/
+    mod.rs          #   re-exports ChatBlock, ToolStatus, ApprovalResolution
+    model.rs        #   ChatBlock enum and friends
+    store.rs        #   global RwLock<Vec<ChatBlock>> + push/append/finalize/resolve ops + tests
+  ui/
+    mod.rs          #   module wiring + re-exports
+    script.rs       #   the entire script_mod! DSL (window, bars, widget templates, modals)
+    widgets/
+      mod.rs        #     ChatScroll/ModelList/SessionList/ProviderList + picked_items helper
+      chat_scroll.rs#     PortalList draw per ChatBlock variant
+      model_list.rs #     RwLock-backed model row data + Widget
+      session_list.rs    RwLock-backed session row data + Widget
+      provider_list.rs   RwLock-backed provider row data + Widget
+  util/
+    mod.rs          #   module wiring
+    json.rs         #   jstr/ju64/jf64/jbool helpers + tests
+    formatting.rs   #   format_secs, relative_time, cap_head/tail, session stats + tests
+makepad.splash      # Studio build/run hub
+resources/          # app icon
+.rho/               # rho project config + memory (see "rho project memory")
 ```
 
-## In progress: main.rs modularization
-`main.rs` currently holds everything and is being split into modules per an
-**8-phase plan. Phase 1 (util extraction) is done.** The full plan and the
-Makepad hot-reload assessment are saved in rho's project memory (titles:
-"rho-ui main.rs modularization plan", "rho-ui Makepad Studio hot-reload
-assessment"). Next phases: `app.rs`, `agent/`, `chat/`, `ui/`. **Put new code
-in its target module — don't keep growing `main.rs`.**
+## Modularization: complete
+The 8-phase plan to split a monolithic `main.rs` (~2,900 lines) into modules
+is **done**. `main.rs` is now ~35 lines (entry point only). Every feature
+lives in its target module — **put new code in the right module, never grow
+`main.rs`.** Key architectural consequence: chat state is a single global
+`RwLock<Vec<ChatBlock>>` (`chat::store::CHAT_BLOCKS`); `App` mutates it and
+tells the PortalList to tail + redraw. The picker widgets (model/session/
+provider) each hold their own `RwLock` static for row data, written by `App`
+and read during `Widget::draw_walk`.
 
 ## Conventions
 - **Commits go straight to `trunk`** (solo project; no PR/branch flow).
@@ -61,8 +84,7 @@ in its target module — don't keep growing `main.rs`.**
 ## Gotchas
 - `makepad-widgets` is a **path dep** → changes in the sibling `makepad` repo
   affect this build, and `../makepad` must be present.
-- The 3 `redundant field names` clippy warnings in `main.rs` are
-  **pre-existing** (not from recent work) — leave them or fix in a dedicated pass.
+- `cargo clippy` is currently **clean** (zero warnings).
 - `rho` is external: if the UI won't connect / nothing happens, confirm `rho`
   is built and resolvable (`RHO_PATH` or `PATH`) **before** debugging the UI.
 

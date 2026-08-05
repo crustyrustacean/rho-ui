@@ -222,6 +222,27 @@ impl RhoAgent {
             serde_json::json!({}),
         )
     }
+    pub fn compact(&mut self) -> Result<(), String> {
+        self.request(
+            RequestKind::Compact,
+            "compact",
+            serde_json::json!({}),
+        )
+    }
+    pub fn clear(&mut self) -> Result<(), String> {
+        self.request(
+            RequestKind::Clear,
+            "clear",
+            serde_json::json!({}),
+        )
+    }
+    pub fn new_session(&mut self) -> Result<(), String> {
+        self.request(
+            RequestKind::NewSession,
+            "newSession",
+            serde_json::json!({}),
+        )
+    }
     pub fn approval_response(
         &mut self,
         approved: bool,

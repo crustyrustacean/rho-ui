@@ -37,6 +37,8 @@ pub struct App {
     #[rust]
     stats_requested: bool,
     #[rust]
+    context_modal_requested: bool,
+    #[rust]
     pending_resume_path: Option<String>,
     #[rust]
     next_frame: NextFrame,
@@ -340,6 +342,15 @@ impl App {
                         .set_text(cx, &format_session_stats(&result));
                     self.ui.modal(cx, ids!(stats_modal)).open(cx);
                 }
+                // Context modal: same getSessionStats response feeds this modal
+                // when the user opened it via the Context button.
+                if self.context_modal_requested {
+                    self.context_modal_requested = false;
+                    self.ui
+                        .label(cx, ids!(context_body))
+                        .set_text(cx, &format_session_stats(&result));
+                    self.ui.modal(cx, ids!(context_modal)).open(cx);
+                }
             }
             RequestKind::ReloadExtensions => {
                 let reloaded = ju64(Some(&result), "reloaded");
@@ -391,6 +402,26 @@ impl App {
                     .label(cx, ids!(extensions_body))
                     .set_text(cx, &body);
                 self.ui.modal(cx, ids!(extensions_modal)).open(cx);
+            }
+            RequestKind::Compact => {
+                self.push_block(cx, ChatBlock::Info("\u{2713} compacted".into()));
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.get_session_stats();
+                }
+            }
+            RequestKind::Clear => {
+                chat_store::clear();
+                self.push_block(cx, ChatBlock::Info("\u{2713} conversation cleared".into()));
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.get_session_stats();
+                }
+            }
+            RequestKind::NewSession => {
+                chat_store::clear();
+                self.push_block(cx, ChatBlock::Info("\u{2713} new session".into()));
+                if let Some(agent) = &mut self.agent {
+                    let _ = agent.get_session_stats();
+                }
             }
         }
     }
@@ -596,6 +627,16 @@ impl App {
             }
             return true;
         }
+        if ui.button(cx, ids!(btn_context)).clicked(actions) {
+            match &mut self.agent {
+                Some(agent) => {
+                    self.context_modal_requested = true;
+                    let _ = agent.get_session_stats();
+                }
+                None => self.push_block(cx, ChatBlock::Info("not connected.".into())),
+            }
+            return true;
+        }
         if ui.button(cx, ids!(stats_close)).clicked(actions) {
             self.ui.modal(cx, ids!(stats_modal)).close(cx);
         }
@@ -616,6 +657,27 @@ impl App {
         }
         if ui.button(cx, ids!(extensions_close)).clicked(actions) {
             self.ui.modal(cx, ids!(extensions_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(context_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(context_modal)).close(cx);
+        }
+        if ui.button(cx, ids!(context_compact)).clicked(actions) {
+            self.ui.modal(cx, ids!(context_modal)).close(cx);
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.compact();
+            }
+        }
+        if ui.button(cx, ids!(context_clear)).clicked(actions) {
+            self.ui.modal(cx, ids!(context_modal)).close(cx);
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.clear();
+            }
+        }
+        if ui.button(cx, ids!(context_new_session)).clicked(actions) {
+            self.ui.modal(cx, ids!(context_modal)).close(cx);
+            if let Some(agent) = &mut self.agent {
+                let _ = agent.new_session();
+            }
         }
         if ui.button(cx, ids!(btn_providers)).clicked(actions) {
             if let Some(agent) = &mut self.agent {
