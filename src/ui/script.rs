@@ -5,8 +5,8 @@ use crate::makepad_widgets::*;
 // ── The UI, in Script DSL ───────────────────────────────────────────────────
 // Layout (top → bottom):
 //   1. Title bar (Fit) — "rho" branding + subtitle.
-//   2. Menu bar (Fit) — row of buttons: Session, Model, Resume, Providers,
-//      Abort, Help, Quit.
+//   2. Menu bar (Fit) — row of buttons: Session, Resume Last, Context, Model,
+//      Providers, Extensions, Reload, Restart, Abort, Stats, Help, Quit.
 //   3. Output scrollback (Fill) — a ChatScroll (PortalList) fed from CHAT_BLOCKS.
 //   4. Working line (Fit) — spinner + "Working" + elapsed + activity.
 //   5. Input box (Fit, 2 lines) — bordered multi-line text input.
@@ -348,6 +348,7 @@ script_mod! {
                     }
 
                     // ── 2. Menu bar — row of buttons ──
+                    // Groups: Session | Config | Process | Info
                     menu_bar := SolidView{
                         width: Fill height: Fit
                         padding: Inset{top: 4, right: 8, bottom: 4, left: 8}
@@ -364,6 +365,14 @@ script_mod! {
                         }
                         btn_resume := Button{
                             text: "Resume Last"
+                            draw_bg.color: #x2a2a30
+                            draw_bg.color_hover: #x3a3a40
+                            draw_bg.color_down: #x1a1a20
+                            draw_text.color: #xcacaca
+                            draw_text.text_style.font_size: 12
+                        }
+                        btn_context := Button{
+                            text: "Context"
                             draw_bg.color: #x2a2a30
                             draw_bg.color_hover: #x3a3a40
                             draw_bg.color_down: #x1a1a20
@@ -396,14 +405,6 @@ script_mod! {
                         }
                         btn_reload := Button{
                             text: "Reload"
-                            draw_bg.color: #x2a2a30
-                            draw_bg.color_hover: #x3a3a40
-                            draw_bg.color_down: #x1a1a20
-                            draw_text.color: #xcacaca
-                            draw_text.text_style.font_size: 12
-                        }
-                        btn_context := Button{
-                            text: "Context"
                             draw_bg.color: #x2a2a30
                             draw_bg.color_hover: #x3a3a40
                             draw_bg.color_down: #x1a1a20
@@ -700,6 +701,14 @@ script_mod! {
                                 View{
                                     width: Fill height: Fit
                                     flow: Right spacing: 8 align: Align{x: 1.0 y: 0.5}
+                                    btn_docs := Button{
+                                        text: "Documentation"
+                                        draw_bg.color: #x2a2a30
+                                        draw_bg.color_hover: #x3a3a40
+                                        draw_bg.color_down: #x1a1a20
+                                        draw_text.color: #xcacaca
+                                        draw_text.text_style.font_size: 12
+                                    }
                                     help_close := Button{
                                         text: "Close"
                                         draw_bg.color: #x2a2a30

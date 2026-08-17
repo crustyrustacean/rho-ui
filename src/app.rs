@@ -13,7 +13,7 @@ use crate::ui::widgets::model_list::ModelEntry;
 use crate::ui::widgets::session_list::SessionEntry;
 use crate::ui::widgets::provider_list::ProviderEntry;
 use crate::chat::{store as chat_store, ChatBlock, ToolStatus, ApprovalResolution};
-
+use webbrowser;
 #[derive(Script, ScriptHook)]
 pub struct App {
     #[live]
@@ -668,6 +668,9 @@ impl App {
         }
         if ui.button(cx, ids!(btn_help)).clicked(actions) {
             self.ui.modal(cx, ids!(help_modal)).open(cx);
+        }
+        if ui.button(cx, ids!(btn_docs)).clicked(actions) {
+            let _ = webbrowser::open("https://crustyrustacean.github.io/rho-coding-agent");
         }
         if ui.button(cx, ids!(help_close)).clicked(actions) {
             self.ui.modal(cx, ids!(help_modal)).close(cx);
