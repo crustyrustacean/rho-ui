@@ -105,7 +105,9 @@ pub(crate) fn parse_notification(v: &serde_json::Value) -> Option<RhoEvent> {
         },
         "tool/result" => RhoEvent::ToolResult {
             name: jstr(p, "name"),
-            is_error: jbool(p, "isError"),
+            // NOTE: the wire key is snake_case here (explicit `#[serde(rename
+            // = "is_error")]` in rho-protocol overrides the camelCase default).
+            is_error: jbool(p, "is_error"),
             output: jstr(p, "output"),
         },
         "tool/denied" => RhoEvent::ToolDenied {
@@ -225,7 +227,7 @@ mod tests {
 
     #[test]
     fn tool_result_success() {
-        match parse(r#"{"method":"tool/result","params":{"name":"r","isError":false,"output":"ok"}}"#)
+        match parse(r#"{"method":"tool/result","params":{"name":"r","is_error":false,"output":"ok"}}"#)
         {
             Some(RhoEvent::ToolResult { name, is_error, output }) => {
                 assert_eq!(name, "r");
@@ -238,7 +240,7 @@ mod tests {
 
     #[test]
     fn tool_result_error() {
-        match parse(r#"{"method":"tool/result","params":{"name":"w","isError":true,"output":"bad"}}"#)
+        match parse(r#"{"method":"tool/result","params":{"name":"w","is_error":true,"output":"bad"}}"#)
         {
             Some(RhoEvent::ToolResult { is_error, .. }) => assert!(is_error),
             other => panic!("expected ToolResult, got {other:?}"),

@@ -366,8 +366,9 @@ impl App {
             }
             RequestKind::ListExtensions => {
                 // Render the extensions list as a formatted string in a
-                // scrollable modal. rho returns an `extensions` array with
-                // at least a `name` field per entry; we show name + status.
+                // scrollable modal. Per the published OpenRPC schema, each
+                // entry is `{ name, tools: [String] }` (older rho sent
+                // status/toolCount, which we no longer read).
                 let body = if let Some(arr) = result.get("extensions").and_then(|x| x.as_array()) {
                     if arr.is_empty() {
                         "No extensions installed.".to_string()
@@ -375,20 +376,24 @@ impl App {
                         arr.iter()
                             .map(|e| {
                                 let name = jstr(Some(e), "name");
-                                let status = jstr(Some(e), "status");
-                                let tools = ju64(Some(e), "toolCount");
-                                if status.is_empty() {
-                                    if tools > 0 {
-                                        format!("  {} ({} tools)", name, tools)
-                                    } else {
-                                        format!("  {}", name)
-                                    }
+                                let tools: Vec<String> = e
+                                    .get("tools")
+                                    .and_then(|t| t.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|t| t.as_str().map(str::to_string))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                if tools.is_empty() {
+                                    format!("  {}", name)
                                 } else {
-                                    if tools > 0 {
-                                        format!("  {} \u{2014} {} ({} tools)", name, status, tools)
-                                    } else {
-                                        format!("  {} \u{2014} {}", name, status)
-                                    }
+                                    format!(
+                                        "  {} ({} tools)\n    {}",
+                                        name,
+                                        tools.len(),
+                                        tools.join(", ")
+                                    )
                                 }
                             })
                             .collect::<Vec<_>>()
