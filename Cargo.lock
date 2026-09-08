@@ -516,6 +516,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "makepad-fast-inflate"
+version = "0.1.0"
+
+[[package]]
 name = "makepad-filesystem-watcher"
 version = "0.1.0"
 
@@ -649,6 +653,7 @@ dependencies = [
  "makepad-shared-bytes",
  "makepad-studio-protocol",
  "makepad-tsdf",
+ "makepad-video",
  "makepad-wasm-bridge",
  "makepad-zune-png",
  "naga",
@@ -678,6 +683,7 @@ dependencies = [
  "makepad-math",
  "makepad-regex",
  "makepad-script-derive",
+ "makepad-stitch",
  "smallvec 1.15.1",
 ]
 
@@ -699,6 +705,10 @@ dependencies = [
 [[package]]
 name = "makepad-shared-bytes"
 version = "1.0.0"
+
+[[package]]
+name = "makepad-stitch"
+version = "0.1.0"
 
 [[package]]
 name = "makepad-studio-protocol"
@@ -725,6 +735,15 @@ version = "0.1.0"
 dependencies = [
  "makepad-math",
  "makepad-micro-serde",
+]
+
+[[package]]
+name = "makepad-video"
+version = "1.0.0"
+dependencies = [
+ "makepad-apple-sys",
+ "makepad-objc-sys",
+ "windows",
 ]
 
 [[package]]
@@ -788,6 +807,7 @@ dependencies = [
 name = "makepad-zune-png"
 version = "0.5.2"
 dependencies = [
+ "makepad-fast-inflate",
  "makepad-zune-core",
  "makepad-zune-inflate",
 ]
@@ -1049,7 +1069,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rho-ui"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "makepad-widgets",
  "serde_json",
