@@ -211,7 +211,7 @@ script_mod! {
                         draw_bg.border_size: 1.0
                         draw_bg.border_color: #x4a4a4a
                         is_multiline: false
-                        submit_on_enter: false
+                        submit_on_enter: true
                     }
                     redirect := Button {
                         text: "Redirect"
@@ -693,7 +693,7 @@ script_mod! {
                                         width: Fill
                                         height: Fit
                                         text: "Type a message and press Enter to chat with the agent.\n\nMenu buttons:\n  Session — list and resume previous sessions\n  Resume Last — quickly resume the most recent session\n  Model — pick a model from the scrollable list\n  Providers — view configured providers and their status\n  Reload — reload extensions from disk (picks up new .rho/extensions/*.ts)\n  Context — compact, clear, or start a new session, with live stats
-  Restart — kill and re-spawn the rho subprocess (use if it's stuck or unresponsive)\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Shift+Enter inserts a newline.\n\nWhile the agent is working, the input placeholder changes to 'Steer the agent...' and your message is sent as a mid-turn steering prompt instead of starting a new turn. Steering messages appear with a distinct background and are reflected in the working line.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline.\n\nTool output longer than 10000 characters is truncated — click Expand to see the full output, Collapse to hide it again."
+  Restart — kill and re-spawn the rho subprocess (use if it's stuck or unresponsive)\n  Abort — cancel the current agent turn\n  Help — this dialog\n  Quit — exit rho\n\nInput: Enter sends, Shift+Enter inserts a newline.\n\nWhile the agent is working, the input placeholder changes to 'Steer the agent...' and your message is sent as a mid-turn steering prompt instead of starting a new turn. Steering messages appear with a distinct background and are reflected in the working line.\n\nTool calls that need approval show Approve / Deny / Redirect buttons inline. Type redirect instructions and press Enter to submit them — no click needed.\n\nTool output longer than 10000 characters is truncated — click Expand to see the full output, Collapse to hide it again."
                                         draw_text.color: #xcacaca
                                         draw_text.text_style.font_size: 12
                                     }

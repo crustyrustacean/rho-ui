@@ -876,6 +876,14 @@ impl App {
                     let msg = item.text_input(cx, ids!(redirect_input)).text();
                     approvals.push((item_id, false, Some(msg)));
                 }
+                // Enter in the redirect box submits the redirect, same as
+                // clicking the Redirect button (keyboard-only approval flow).
+                if let Some((msg, _mods)) = item
+                    .text_input(cx, ids!(redirect_input))
+                    .returned(actions)
+                {
+                    approvals.push((item_id, false, Some(msg)));
+                }
             }
         }
         for (idx, approved, msg) in approvals {
